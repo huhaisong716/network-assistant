@@ -3,9 +3,7 @@ name: Build Windows EXE
 on:
   push:
     branches: [ main ]
-  pull_request:
-    branches: [ main ]
-  workflow_dispatch:  # 手动触发
+  workflow_dispatch:
 
 jobs:
   build:
@@ -23,11 +21,10 @@ jobs:
     - name: 安装依赖
       run: |
         pip install -r requirements.txt
-        pip install pyinstaller upx
 
     - name: 编译 exe
       run: |
-        pyinstaller --onefile --clean --name 网工助手 --upx-dir=C:\tools\upx app.py
+        pyinstaller --onefile --clean --name 网工助手 app.py
       shell: cmd
 
     - name: 上传构建产物
