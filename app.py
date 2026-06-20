@@ -4,7 +4,7 @@ import os, json, uuid, time, threading
 from pathlib import Path
 import paramiko
 from flask import Flask, request, jsonify, render_template_string
-CORS(app) = __import__('flask_cors', fromlist=['CORS']).CORS
+from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
