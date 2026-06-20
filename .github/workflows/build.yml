@@ -24,7 +24,7 @@ jobs:
 
     - name: 编译 exe
       run: |
-        pyinstaller --onefile --clean --name 网工助手 app.py
+        pyinstaller --onefile --windowed --clean --name 网工助手 app.py
       shell: cmd
 
     - name: 上传构建产物
