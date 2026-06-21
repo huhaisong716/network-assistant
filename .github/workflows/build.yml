@@ -14,11 +14,11 @@ jobs:
           python-version: "3.10"
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
-      - name: Build with PyInstaller
+          pip install -r nvidia-tool/requirements.txt
+      - name: Build nvidia-tool with PyInstaller
         run: |
-          pyinstaller --onefile --windowed --clean --name 计算器 app.py
+          pyinstaller --onefile --clean --name nvidia-tool nvidia-tool/main.py
       - uses: actions/upload-artifact@v4
         with:
-          name: 计算器
-          path: dist/计算器.exe
+          name: nvidia-tool
+          path: dist/nvidia-tool.exe
