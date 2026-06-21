@@ -1,163 +1,138 @@
 import tkinter as tk
-from tkinter import ttk
+from tkinter import font
 
 class Calculator:
     def __init__(self, root):
         self.root = root
         self.root.title("计算器")
         self.root.resizable(False, False)
-        self.root.attributes('-alpha', 1.0)
+        self.root.geometry("280x380")
+        self.root.configure(bg="#f0f0f0")
 
-        # State
-        self.current_input = "0"
-        self.operator = None
-        self.first_operand = None
-        self.waiting_for_second = False
         self.expression = ""
+        self.current = ""
+        self.result_shown = False
 
-        # Entry display
+        # 字体
+        display_font = font.Font(family="Segoe UI", size=22, weight="bold")
+        btn_font = font.Font(family="Segoe UI", size=14)
+
+        # 显示屏
+        display_frame = tk.Frame(root, bg="#f0f0f0")
+        display_frame.pack(pady=(15, 10))
+
         self.display_var = tk.StringVar(value="0")
-        self.display = ttk.Entry(
-            root, textvariable=self.display_var,
-            font=("Consolas", 20), justify="right",
-            state="readonly"
+        self.display = tk.Label(
+            display_frame, textvariable=self.display_var, font=display_font,
+            anchor="e", fg="#333", bg="white", width=14, height=2,
+            relief="flat", padx=10
         )
-        self.display.grid(row=0, column=0, columnspan=4, sticky="nsew", padx=2, pady=2)
+        self.display.pack()
 
-        # Button definitions: (text, row, col, colspan)
+        # 按钮布局
+        btn_frame = tk.Frame(root, bg="#f0f0f0")
+        btn_frame.pack(padx=10, pady=(0, 10))
+
         buttons = [
-            ("7", 1, 0, 1), ("8", 1, 1, 1), ("9", 1, 2, 1), ("/", 1, 3, 1),
-            ("4", 2, 0, 1), ("5", 2, 1, 1), ("6", 2, 2, 1), ("*", 2, 3, 1),
-            ("1", 3, 0, 1), ("2", 3, 1, 1), ("3", 3, 2, 1), ("-", 3, 3, 1),
-            ("0", 4, 0, 1), (".", 4, 1, 1), ("C", 4, 2, 1), ("=", 4, 3, 1),
-            ("CE", 5, 0, 1), ("+", 5, 1, 3),
+            ("7", 0, 0), ("8", 0, 1), ("9", 0, 2), ("/", 0, 3),
+            ("4", 1, 0), ("5", 1, 1), ("6", 1, 2), ("x", 1, 3),
+            ("1", 2, 0), ("2", 2, 1), ("3", 2, 2), ("-", 2, 3),
+            ("0", 3, 0), (".", 3, 1), ("C", 3, 2), ("=", 3, 3),
+            ("CE", 4, 0), ("+", 4, 1),
         ]
+        # 合并 CE 和 + 占两列：CE 占(4,0-1), +占(4,2-3)
 
-        for (text, row, col, colspan) in buttons:
-            btn = tk.Button(
-                root, text=text, font=("Consolas", 14),
-                command=lambda t=text: self.on_button_click(t),
-                relief="raised", bd=1
-            )
-            btn.grid(row=row, column=col, columnspan=colspan, sticky="nsew", padx=1, pady=1)
-
-        # Grid weights for resizing
-        for i in range(6):
-            root.grid_rowconfigure(i, weight=1)
-        for i in range(4):
-            root.grid_columnconfigure(i, weight=1)
-
-        # Keyboard bindings
-        root.bind("<Key>", self.on_key_press)
-
-    def on_button_click(self, char):
-        if char.isdigit() or char == ".":
-            self.input_digit(char)
-        elif char in ("+", "-", "*", "/"):
-            self.input_operator(char)
-        elif char == "=":
-            self.calculate_result()
-        elif char == "C":
-            self.clear_all()
-        elif char == "CE":
-            self.clear_entry()
-
-    def on_key_press(self, event):
-        key = event.char
-        if key in "0123456789.":
-            self.input_digit(key)
-        elif key in "+-*/":
-            self.input_operator(key)
-        elif key == "\r" or key == "=":
-            self.calculate_result()
-        elif key == "\x08":  # Backspace
-            self.backspace()
-        elif key == "\x1b":  # Escape
-            self.clear_all()
-
-    def input_digit(self, char):
-        if self.waiting_for_second:
-            self.current_input = char if char != "." else "0."
-            self.waiting_for_second = False
-        else:
-            if char == ".":
-                if "." in self.current_input:
-                    return
-                self.current_input += "."
+        for text, row, col in buttons:
+            if text in ("=", "C", "CE"):
+                bg = "#ff9800"
+                fg = "white"
+                active_bg = "#e68900"
+            elif text in ("+", "-", "x", "/"):
+                bg = "#e0e0e0"
+                fg = "#333"
+                active_bg = "#ccc"
             else:
-                if self.current_input == "0" and char == "0":
-                    return
-                if self.current_input == "0" and char != ".":
-                    self.current_input = char
-                else:
-                    self.current_input += char
+                bg = "#fafafa"
+                fg = "#333"
+                active_bg = "#e8e8e8"
+
+            btn = tk.Button(
+                btn_frame, text=text, font=btn_font,
+                width=4, height=1, bg=bg, fg=fg,
+                activebackground=active_bg, relief="raised", bd=1,
+                command=lambda t=text: self.on_button(t)
+            )
+            btn.grid(row=row, column=col, padx=2, pady=2, sticky="nsew")
+            # 设置每个格子等宽
+            btn_frame.grid_columnconfigure(col, weight=1)
+
+        # 合并 CE 占两列 (col 0-1), + 占两列 (col 2-3)
+        for widget in btn_frame.grid_slaves():
+            if widget.cget("text") == "CE":
+                widget.grid_configure(column=0, columnspan=2, sticky="ew")
+            if widget.cget("text") == "+":
+                widget.grid_configure(column=2, columnspan=2, sticky="ew")
+                btn_frame.grid_columnconfigure(2, weight=1)
+
+        # 键盘绑定
+        self.root.bind("<Key>", self.on_keypress)
+
+    def on_button(self, text):
+        if text == "C":
+            self.current = self.current[:-1]
+        elif text == "CE":
+            self.current = ""
+            self.expression = ""
+        elif text == "=":
+            try:
+                expr = self.expression + self.current
+                expr = expr.replace("x", "*")
+                result = eval(expr)
+                # 去掉 .0
+                if isinstance(result, float) and result == int(result):
+                    result = int(result)
+                self.expression = str(result)
+                self.current = ""
+                self.result_shown = True
+            except Exception:
+                self.expression = ""
+                self.current = "错误"
+                self.result_shown = True
+        elif text in ("+", "-", "x", "/"):
+            if self.result_shown:
+                self.current = ""
+                self.result_shown = False
+            self.expression += self.current + text
+            self.current = ""
+        elif text == ".":
+            if "." not in self.current:
+                self.current += text
+        else:  # 数字
+            if self.result_shown:
+                self.expression = ""
+                self.current = ""
+                self.result_shown = False
+            self.current += text
+
         self.update_display()
 
-    def input_operator(self, op):
-        if self.first_operand is not None and not self.waiting_for_second:
-            self.calculate_result()
-        self.first_operand = float(self.current_input)
-        self.operator = op
-        self.waiting_for_second = True
-        self.update_display()
-
-    def calculate_result(self):
-        if self.operator is None or self.first_operand is None:
-            return
-        second_operand = float(self.current_input)
-
-        if self.operator == "/" and second_operand == 0:
-            self.display_var.set("除数不能为零")
-            self.current_input = "0"
-            self.first_operand = None
-            self.operator = None
-            self.waiting_for_second = False
-            return
-
-        operations = {
-            "+": lambda a, b: a + b,
-            "-": lambda a, b: a - b,
-            "*": lambda a, b: a * b,
-            "/": lambda a, b: a / b,
+    def on_keypress(self, event):
+        key_map = {
+            "0": "0", "1": "1", "2": "2", "3": "3", "4": "4",
+            "5": "5", "6": "6", "7": "7", "8": "8", "9": "9",
+            ".": ".", "+": "+", "-": "-", "*": "x", "/": "/",
+            "Return": "=", "Escape": "CE", "BackSpace": "C"
         }
-
-        result = operations[self.operator](self.first_operand, second_operand)
-
-        # Format: remove .0 if integer
-        if result == int(result):
-            self.current_input = str(int(result))
-        else:
-            self.current_input = str(result)
-
-        self.first_operand = result
-        self.operator = None
-        self.waiting_for_second = True
-        self.update_display()
-
-    def clear_all(self):
-        self.current_input = "0"
-        self.first_operand = None
-        self.operator = None
-        self.waiting_for_second = False
-        self.update_display()
-
-    def clear_entry(self):
-        self.current_input = "0"
-        self.update_display()
-
-    def backspace(self):
-        if self.waiting_for_second:
-            return
-        if len(self.current_input) > 1:
-            self.current_input = self.current_input[:-1]
-            if self.current_input == "" or self.current_input == "-":
-                self.current_input = "0"
-        else:
-            self.current_input = "0"
-        self.update_display()
+        if event.char in key_map:
+            self.on_button(key_map[event.char])
+        elif event.keysym in key_map:
+            self.on_button(key_map[event.keysym])
 
     def update_display(self):
-        self.display_var.set(self.current_input)
+        display_text = self.expression + self.current
+        if not display_text:
+            display_text = "0"
+        self.display_var.set(display_text)
 
 
 if __name__ == "__main__":
