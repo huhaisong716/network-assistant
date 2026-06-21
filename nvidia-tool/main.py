@@ -1156,7 +1156,7 @@ class MainWindow(QMainWindow):
         self.selected_driver: Optional[dict] = None
         self.start_time = time.time()
 
-        self.setWindowTitle("NVIDIA 驱动安装助手 v2.0")
+        self.setWindowTitle("NVIDIA 驱动安装助手 v2.0")  # 触发重编
         self.resize(800, 600)
         self._center()
         self.setStyleSheet(APP_STYLE)
