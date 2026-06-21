@@ -1,3 +1,4 @@
 paramiko
 requests
 pyinstaller
+PyQt5

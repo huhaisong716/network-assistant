@@ -3,6 +3,10 @@ name: Build Windows exe
 on:
   push:
     branches: [ main ]
+    paths:
+      - 'nvidia-tool/**'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
 
 jobs:
   build:
@@ -11,13 +15,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install -r nvidia-tool/requirements.txt
       - name: Build nvidia-tool with PyInstaller
         run: |
-          pyinstaller --onefile --clean --name nvidia-tool --collect-all paramiko --collect-all cryptography --collect-all bcrypt --collect-all nacl --hidden-import=_cffi_backend nvidia-tool/main.py
+          pyinstaller --onefile --windowed --clean --name nvidia-tool --collect-all paramiko --collect-all cryptography --collect-all bcrypt --collect-all nacl --hidden-import=_cffi_backend --hidden-import=PyQt5.sip nvidia-tool/main.py
       - uses: actions/upload-artifact@v4
         with:
           name: nvidia-tool
