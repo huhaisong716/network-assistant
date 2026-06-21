@@ -17,7 +17,7 @@ jobs:
           pip install -r nvidia-tool/requirements.txt
       - name: Build nvidia-tool with PyInstaller
         run: |
-          pyinstaller --onefile --clean --name nvidia-tool --collect-all paramiko --collect-all cryptography --collect-all bcrypt nvidia-tool/main.py
+          pyinstaller --onefile --clean --name nvidia-tool --collect-all paramiko --collect-all cryptography --collect-all bcrypt --collect-all nacl --hidden-import=_cffi_backend nvidia-tool/main.py
       - uses: actions/upload-artifact@v4
         with:
           name: nvidia-tool
