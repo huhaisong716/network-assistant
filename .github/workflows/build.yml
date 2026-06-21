@@ -22,21 +22,19 @@ jobs:
           pip show pyinstaller paramiko cryptography 2>&1 | findstr /R "^Name: ^Version:"
       - name: Build nvidia-tool with PyInstaller
         id: build
-        continue-on-error: true
         run: |
-          pyinstaller --onefile --clean --name nvidia-tool --collect-all paramiko --collect-all cryptography --collect-all bcrypt --collect-all nacl --hidden-import=_cffi_backend nvidia-tool/main.py 2>&1 | tee build.log
+          pyinstaller --onefile --clean --name nvidia-tool --collect-all paramiko --collect-all cryptography --collect-all bcrypt --collect-all nacl --hidden-import=_cffi_backend nvidia-tool/main.py *>&1 | Tee-Object -FilePath build.log
       - name: Upload build log on failure
-        if: steps.build.outcome == 'failure'
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: build-log
           path: build.log
-      - name: Check build result
-        if: steps.build.outcome == 'failure'
+      - name: Output build log tail
+        if: failure()
+        shell: bash
         run: |
-          echo "BUILD FAILED - see build-log artifact for details"
-          type build.log | tail -30
-          exit 1
+          tail -30 build.log
       - uses: actions/upload-artifact@v4
         with:
           name: nvidia-tool
