@@ -15,28 +15,9 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r nvidia-tool/requirements.txt
-      - name: Debug - check files
-        run: |
-          dir nvidia-tool
-          python --version
-          pip show pyinstaller paramiko cryptography 2>&1 | findstr /R "^Name: ^Version:"
       - name: Build nvidia-tool with PyInstaller
-        id: build
-        continue-on-error: true
         run: |
-          pyinstaller --onefile --clean --name nvidia-tool --collect-all paramiko --collect-all cryptography --collect-all bcrypt --collect-all nacl --hidden-import=_cffi_backend nvidia-tool/main.py *>&1 | Tee-Object -FilePath build.log
-      - name: Upload build log
-        if: always() && steps.build.outcome == 'failure'
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log
-          path: build.log
-      - name: Output build log tail
-        if: always() && steps.build.outcome == 'failure'
-        shell: bash
-        run: |
-          tail -30 build.log
-          echo "--- Build failed, see build-log artifact ---"
+          pyinstaller --onefile --clean --name nvidia-tool --collect-all paramiko --collect-all cryptography --collect-all bcrypt --collect-all nacl --hidden-import=_cffi_backend nvidia-tool/main.py
       - uses: actions/upload-artifact@v4
         with:
           name: nvidia-tool
