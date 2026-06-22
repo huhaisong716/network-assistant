@@ -39,6 +39,51 @@ DARK_TEXT = "#333333"
 GREEN_OK = "#27AE60"
 RED_ERR = "#E74C3C"
 
+
+# ── 确认对话框（执行重要操作前征求同意） ────────────────
+class ConfirmDialog(QMessageBox):
+    """执行重要操作前的确认弹窗，显示中文说明 + 同意/取消"""
+
+    def __init__(self, title: str, description: str, detail: str = "",
+                 parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setIcon(QMessageBox.Question)
+        self.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        self.button(QMessageBox.Yes).setText("同意")
+        self.button(QMessageBox.No).setText("取消")
+        self.setDefaultButton(QMessageBox.No)
+
+        # 组装说明文本
+        text = f"<b style='font-size:14px; color:{DEEP_BLUE};'>{description}</b>"
+        if detail:
+            text += f"<br><br><span style='font-size:12px; color:{DARK_TEXT};'>{detail}</span>"
+        self.setText(text)
+
+        # 样式
+        self.setStyleSheet(f"""
+            QMessageBox {{ background-color: {WHITE}; }}
+            QPushButton {{
+                background-color: {BRIGHT_BLUE}; color: white;
+                border-radius: 4px; padding: 8px 24px;
+                font-size: 13px; font-weight: bold;
+                min-width: 80px;
+            }}
+            QPushButton:hover {{ background-color: {DEEP_BLUE}; }}
+        """)
+        self.button(QMessageBox.No).setStyleSheet(f"""
+            QPushButton {{
+                background-color: {LIGHT_GRAY}; color: {DARK_TEXT};
+                border: 1px solid #CCC; border-radius: 4px;
+                padding: 8px 24px; font-size: 13px; min-width: 80px;
+            }}
+            QPushButton:hover {{ background-color: #E0E0E0; }}
+        """)
+
+    def is_accepted(self) -> bool:
+        return self.exec() == QMessageBox.Yes
+
+
 # ── 页面定义 ──────────────────────────────────────────────
 PAGES = ["服务器", "显卡检测", "驱动选择", "环境检查", "安装", "CUDA/cuDNN", "报告"]
 PAGE_COUNT = len(PAGES)
@@ -590,6 +635,23 @@ class EnvCheckPage(QWidget):
             self.btn_fix.setEnabled(True)
 
     def _fix_all(self):
+        # ── 确认弹窗 ──
+        failed = [k for k, (ok, _) in self._env_results.items() if not ok]
+        if not failed:
+            return
+        fix_names = [CHECK_LABELS.get(k, k) for k in failed]
+        dlg = ConfirmDialog(
+            "操作确认",
+            "即将在远程服务器上执行一键修复",
+            f"将自动修复以下 {len(failed)} 项：\n"
+            f"{chr(10).join('• ' + n for n in fix_names)}\n\n"
+            "⚠️ 会执行 sudo 命令修改系统配置（如禁用 nouveau、\n"
+            "   安装依赖包等），请确认服务器状态正常。",
+            parent=self,
+        )
+        if not dlg.is_accepted():
+            return
+
         ssh = self.get_ssh()
         if not ssh:
             return
@@ -668,6 +730,23 @@ class InstallPage(QWidget):
         self.step_label.setText(label)
 
     def _start_install(self):
+        # ── 确认弹窗 ──
+        driver_v = self.get_driver()
+        gpu = self.get_gpu()
+        gpu_model = gpu.get("model", "未知") if isinstance(gpu, dict) else "未知"
+        dlg = ConfirmDialog(
+            "操作确认",
+            "即将在远程服务器上安装 NVIDIA 显卡驱动",
+            f"目标服务器：{self.get_ssh().host if self.get_ssh() else '未知'}\n"
+            f"显卡型号：{gpu_model}\n"
+            f"驱动版本：{driver_v or '未知'}\n\n"
+            "⚠️ 安装过程中会禁用 nouveau 驱动、停止显示管理器，\n"
+            "   安装完成后可能需要重启服务器。",
+            parent=self,
+        )
+        if not dlg.is_accepted():
+            return
+
         ssh = self.get_ssh()
         driver_v = self.get_driver()
         gpu = self.get_gpu()
@@ -779,6 +858,26 @@ class CudaPage(QWidget):
         self.log_view.append(msg)
 
     def _start_install(self):
+        # ── 确认弹窗 ──
+        actions = []
+        if self.cb_cuda.isChecked():
+            actions.append(f"CUDA Toolkit {self.cuda_ver_combo.currentText()}")
+        if self.cb_cudnn.isChecked():
+            actions.append(f"cuDNN {self.cudnn_ver_combo.currentText()}")
+        if not actions:
+            QMessageBox.information(self, "提示", "请先勾选要安装的组件")
+            return
+        dlg = ConfirmDialog(
+            "操作确认",
+            "即将在远程服务器上安装 CUDA 工具包",
+            f"将安装：{', '.join(actions)}\n\n"
+            "⚠️ 安装过程会下载大量文件（数百 MB），请确认\n"
+            "   网络连接稳定。安装后可能需要配置环境变量。",
+            parent=self,
+        )
+        if not dlg.is_accepted():
+            return
+
         ssh = self.get_ssh()
         if not ssh:
             QMessageBox.warning(self, "提示", "请先在「服务器」页面连接")
