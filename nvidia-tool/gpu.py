@@ -1,78 +1,55 @@
-"""显卡检测 - 远程 lspci + nvidia-smi"""
-
-import re
-
-
-# 常见 NVIDIA 显卡型号匹配列表
-GPU_MODELS = [
-    (re.compile(r"RTX 5090", re.I), "NVIDIA RTX 5090"),
-    (re.compile(r"RTX 5080", re.I), "NVIDIA RTX 5080"),
-    (re.compile(r"RTX 5070", re.I), "NVIDIA RTX 5070"),
-    (re.compile(r"RTX 5060", re.I), "NVIDIA RTX 5060"),
-    (re.compile(r"RTX 4090", re.I), "NVIDIA RTX 4090"),
-    (re.compile(r"RTX 4080", re.I), "NVIDIA RTX 4080"),
-    (re.compile(r"RTX 4070", re.I), "NVIDIA RTX 4070"),
-    (re.compile(r"RTX 4060", re.I), "NVIDIA RTX 4060"),
-    (re.compile(r"RTX 3090", re.I), "NVIDIA RTX 3090"),
-    (re.compile(r"RTX 3080", re.I), "NVIDIA RTX 3080"),
-    (re.compile(r"RTX 3070", re.I), "NVIDIA RTX 3070"),
-    (re.compile(r"RTX 3060", re.I), "NVIDIA RTX 3060"),
-    (re.compile(r"PRO 6000", re.I), "NVIDIA PRO 6000"),
-    (re.compile(r"PRO 5000", re.I), "NVIDIA PRO 5000"),
-    (re.compile(r"\bA100\b", re.I), "NVIDIA A100"),
-    (re.compile(r"\bA6000\b", re.I), "NVIDIA A6000"),
-    (re.compile(r"\bA5000\b", re.I), "NVIDIA A5000"),
-    (re.compile(r"\bA4000\b", re.I), "NVIDIA A4000"),
-    (re.compile(r"\bH100\b", re.I), "NVIDIA H100"),
-    (re.compile(r"\bH200\b", re.I), "NVIDIA H200"),
-    (re.compile(r"\bB100\b", re.I), "NVIDIA B100"),
-    (re.compile(r"\bB200\b", re.I), "NVIDIA B200"),
-    (re.compile(r"GTX 1080", re.I), "NVIDIA GTX 1080"),
-    (re.compile(r"GTX 1070", re.I), "NVIDIA GTX 1070"),
-    (re.compile(r"GTX 1060", re.I), "NVIDIA GTX 1060"),
-    (re.compile(r"\bT4\b", re.I), "NVIDIA T4"),
-    (re.compile(r"\bV100\b", re.I), "NVIDIA V100"),
-    (re.compile(r"\bP100\b", re.I), "NVIDIA P100"),
-    (re.compile(r"\bK80\b", re.I), "NVIDIA K80"),
-]
+"""远程检测 NVIDIA 显卡信息"""
+from ssh_client import SSHClient
 
 
-def detect_gpu(ssh):
-    """远程检测显卡型号和驱动状态"""
-    gpu = {"model": "", "has_driver": False, "driver_version": "", "cuda_version": ""}
+def detect_gpu(ssh: SSHClient) -> dict | str:
+    """检测显卡信息，返回 dict 或错误字符串"""
+    # 1. lspci 判断显卡型号
+    ec, out, err = ssh.exec("lspci | grep -i nvidia 2>/dev/null")
+    if ec != 0 or not out.strip():
+        ec2, out2, _ = ssh.exec("lspci | grep -i vga 2>/dev/null")
+        if "nvidia" not in out2.lower():
+            return "未检测到 NVIDIA 显卡"
+        out = out2
 
-    # Step 1: lspci 检测显卡型号
-    out, err, code = ssh.exec("lspci -nn | grep -i nvidia")
-    if code != 0 or not out.strip():
-        out, err, code = ssh.exec("sudo lspci -nn | grep -i nvidia")
-    if code != 0 or not out.strip():
-        raise RuntimeError("未检测到 NVIDIA 显卡")
+    model = out.strip().split(": ", 1)[-1] if ": " in out else out.strip()
 
-    gpu["model"] = _parse_model(out)
+    # 2. nvidia-smi 检测驱动信息
+    ec2, smi_out, smi_err = ssh.exec("nvidia-smi --query-gpu=name,driver_version,cuda_version --format=csv,noheader 2>/dev/null")
+    has_driver = ec2 == 0 and smi_out.strip()
 
-    # Step 2: 检查是否已安装驱动
-    out, _, code = ssh.exec("nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null")
-    if code == 0 and out.strip():
-        gpu["has_driver"] = True
-        gpu["driver_version"] = out.strip()
+    result = {
+        "model": model,
+        "driver_installed": has_driver,
+    }
 
-        # 检测 CUDA 版本
-        out, _, _ = ssh.exec("nvcc --version 2>/dev/null | grep 'release'")
-        m = re.search(r"release (\S+),", out)
-        if m:
-            gpu["cuda_version"] = m.group(1)
+    if has_driver:
+        parts = [p.strip() for p in smi_out.strip().split(", ")]
+        result["driver_version"] = parts[1] if len(parts) > 1 else ""
+        result["cuda_version"] = parts[2] if len(parts) > 2 else ""
+    else:
+        result["driver_version"] = ""
+        result["cuda_version"] = ""
 
-    return gpu
+    # 3. 系统信息
+    ec3, arch_out, _ = ssh.exec("uname -m")
+    result["arch"] = arch_out.strip() if ec3 == 0 else "x86_64"
+
+    return result
 
 
-def _parse_model(lspci_output: str) -> str:
-    """从 lspci 输出中提取显卡型号"""
-    for pattern, name in GPU_MODELS:
-        if pattern.search(lspci_output):
-            return name
-
-    # 回退：从方括号提取设备名
-    m = re.search(r"\[([A-Za-z0-9 /]+)\]", lspci_output)
-    if m:
-        return f"NVIDIA {m.group(1).strip()}"
-    return lspci_output.strip().split("\n")[0][:60]
+def get_compute_capability(model_name: str) -> str | None:
+    """根据显卡型号返回计算能力"""
+    mapping = {
+        "RTX 4090": "8.9", "RTX 4080": "8.9", "RTX 4070": "8.9",
+        "RTX 4060": "8.9", "RTX 3090": "8.6", "RTX 3080": "8.6",
+        "RTX 3070": "8.6", "RTX 3060": "8.6",
+        "RTX 2080": "7.5", "RTX 2070": "7.5", "RTX 2060": "7.5",
+        "GTX 1660": "7.5", "GTX 1650": "7.5",
+        "GTX 1080": "6.1", "GTX 1070": "6.1", "GTX 1060": "6.1",
+        "A100": "8.0", "V100": "7.0", "T4": "7.5", "H100": "9.0",
+    }
+    for key, cap in mapping.items():
+        if key.lower() in model_name.lower():
+            return cap
+    return None

@@ -1,72 +1,49 @@
-"""AI 诊断 - DeepSeek API 调用"""
-
+"""DeepSeek API AI 错误诊断"""
 import json
-import requests
+import urllib.request
+import urllib.error
+from config import get_deepseek_key
 
-from errors import find_known_error
 
-
-def diagnose(api_key: str, error_msg: str, gpu_model: str = "") -> dict:
-    """诊断错误，先查本地库，再调 API"""
-    # 先查本地
-    known = find_known_error(error_msg)
-    if known:
-        return {"reason": known["title"], "fix": known["fix"], "source": "local"}
-
-    # 无 API key 时返回空
+def diagnose_with_deepseek(error_text: str, context: str = "") -> str:
+    """使用 DeepSeek API 诊断错误"""
+    api_key = get_deepseek_key()
     if not api_key:
-        return {"reason": "未知错误", "fix": "请查看日志文件 ~/.nvidia-tool/logs/", "source": "none"}
+        return "请先在设置中配置 DeepSeek API Key"
 
-    # 调 DeepSeek API
-    return _call_deepseek(api_key, error_msg, gpu_model)
-
-
-def _call_deepseek(api_key: str, error_msg: str, gpu_model: str) -> dict:
-    """调用 DeepSeek API"""
-    prompt = f"""你是一个 Linux NVIDIA 驱动安装专家。以下是在 Ubuntu 上安装 NVIDIA 驱动时遇到的错误信息，请给出：
-1. 错误原因（一句话）
-2. 修复命令（可直接复制执行）
+    prompt = f"""你是一个 NVIDIA 驱动安装专家。分析以下错误信息，给出：
+1. 问题原因（中文，一句话）
+2. 解决方案（可执行的命令行步骤）
 
 错误信息：
-{error_msg[:2000]}
+{error_text}
 
-GPU: {gpu_model}
+上下文：
+{context}
+"""
 
-请以 JSON 格式回复：{{"reason": "错误原因", "fix": "修复命令"}}
-只返回 JSON，不要其他文字。"""
+    data = json.dumps({
+        "model": "deepseek-chat",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.3,
+        "max_tokens": 1000,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        "https://api.deepseek.com/v1/chat/completions",
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
 
     try:
-        resp = requests.post(
-            "https://api.deepseek.com/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "deepseek-chat",
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.3,
-                "max_tokens": 500,
-            },
-            timeout=30,
-        )
-        data = resp.json()
-        content = data["choices"][0]["message"]["content"]
-
-        # 解析 JSON
-        content = content.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        return {**json.loads(content), "source": "ai"}
-
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+            return result["choices"][0]["message"]["content"].strip()
+    except urllib.error.HTTPError as e:
+        return f"API 请求失败 (HTTP {e.code}): {e.reason}"
     except Exception as e:
-        return {"reason": f"AI 诊断失败: {e}", "fix": "请查看日志", "source": "error"}
-
-
-def prompt_fix(diag: dict) -> bool:
-    """显示诊断结果并询问是否修复"""
-    print(f"\n┌─ {'AI 诊断' if diag.get('source') == 'ai' else '错误诊断'} ─────────────────────┐")
-    print(f"│ 原因: {diag.get('reason', '未知')}")
-    print(f"│ 修复: {diag.get('fix', '无')}")
-    print("└────────────────────────────────────────────┘")
-
-    ans = input("\n是否执行修复？[Y/n]: ").strip().lower()
-    return ans != "n"
+        return f"诊断失败: {e}"

@@ -1,59 +1,59 @@
-"""配置管理 - 服务器列表、API Key 持久化"""
-
-import json
+"""服务器和 API Key 配置持久化"""
 import os
-from dataclasses import dataclass, field, asdict
-from typing import Optional
+import json
+import stat
+from pathlib import Path
 
-CONFIG_DIR = os.path.expanduser("~/.nvidia-tool")
-CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
-LOG_DIR = os.path.join(CONFIG_DIR, "logs")
-
-
-@dataclass
-class Server:
-    name: str = ""
-    host: str = ""
-    port: int = 22
-    user: str = "root"
-    key_path: str = "~/.ssh/id_rsa"
+CONFIG_DIR = Path.home() / ".nvidia-tool"
+CONFIG_FILE = CONFIG_DIR / "config.json"
 
 
-@dataclass
-class Config:
-    servers: list = field(default_factory=list)
-    api_key: str = ""
-    default_port: int = 22
+def _ensure_config():
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    if not CONFIG_FILE.exists():
+        with open(CONFIG_FILE, "w") as f:
+            json.dump({"servers": [], "deepseek_api_key": ""}, f, indent=2)
+        # 安全权限
+        os.chmod(str(CONFIG_FILE), stat.S_IRUSR | stat.S_IWUSR)
 
 
-def get_log_dir() -> str:
-    os.makedirs(LOG_DIR, exist_ok=True)
-    return LOG_DIR
+def load() -> dict:
+    _ensure_config()
+    with open(CONFIG_FILE) as f:
+        return json.load(f)
 
 
-def load_config() -> Config:
-    cfg = Config()
-    if not os.path.exists(CONFIG_FILE):
-        return cfg
-    try:
-        with open(CONFIG_FILE, "r") as f:
-            data = json.load(f)
-            cfg.api_key = data.get("api_key", "")
-            cfg.default_port = data.get("default_port", 22)
-            for s in data.get("servers", []):
-                cfg.servers.append(Server(**s))
-    except Exception:
-        pass
-    return cfg
-
-
-def save_config(cfg: Config):
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    os.makedirs(LOG_DIR, exist_ok=True)
-    data = {
-        "api_key": cfg.api_key,
-        "default_port": cfg.default_port,
-        "servers": [asdict(s) for s in cfg.servers],
-    }
+def save(data: dict):
+    _ensure_config()
     with open(CONFIG_FILE, "w") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+        json.dump(data, f, indent=2)
+    os.chmod(str(CONFIG_FILE), stat.S_IRUSR | stat.S_IWUSR)
+
+
+def get_servers() -> list[dict]:
+    """返回 [{name, host, port, user, auth_type, key_path|password}, ...]"""
+    return load().get("servers", [])
+
+
+def add_server(server: dict):
+    data = load()
+    # 同名替换
+    data["servers"] = [s for s in data["servers"] if s.get("name") != server.get("name")]
+    data["servers"].append(server)
+    save(data)
+
+
+def remove_server(name: str):
+    data = load()
+    data["servers"] = [s for s in data["servers"] if s.get("name") != name]
+    save(data)
+
+
+def get_deepseek_key() -> str:
+    return load().get("deepseek_api_key", "")
+
+
+def set_deepseek_key(key: str):
+    data = load()
+    data["deepseek_api_key"] = key
+    save(data)

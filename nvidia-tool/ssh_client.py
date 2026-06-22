@@ -1,87 +1,59 @@
-"""SSH 连接管理 - paramiko 封装"""
-
-import os
+"""paramiko SSH 封装"""
 import paramiko
-from typing import Optional, Tuple
+from paramiko.ssh_exception import AuthenticationException, SSHException
 
 
 class SSHClient:
-    def __init__(self, host: str, port: int = 22, user: str = "root", key_path: str = "~/.ssh/id_rsa"):
+    def __init__(self, host: str, port: int = 22, user: str = "root",
+                 password: str = None, key_path: str = None):
         self.host = host
         self.port = port
         self.user = user
-        self.key_path = os.path.expanduser(key_path)
-        self.client: Optional[paramiko.SSHClient] = None
+        self.password = password
+        self.key_path = key_path
+        self._client: paramiko.SSHClient | None = None
 
-    def connect(self) -> str:
-        """建立 SSH 连接，返回空字符串表示成功，否则返回错误信息"""
-        self.client = paramiko.SSHClient()
-        self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
+    def connect(self, timeout: int = 10) -> str:
+        """连接服务器，成功返回 ''，失败返回错误信息"""
+        self._client = paramiko.SSHClient()
+        self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
-            # 优先密钥认证
-            key = paramiko.RSAKey.from_private_key_file(self.key_path)
-            self.client.connect(
-                self.host, port=self.port, username=self.user,
-                pkey=key, timeout=10, banner_timeout=30
-            )
+            if self.key_path:
+                key = paramiko.RSAKey.from_private_key_file(self.key_path)
+                self._client.connect(
+                    self.host, port=self.port, username=self.user,
+                    pkey=key, timeout=timeout, allow_agent=False,
+                )
+            else:
+                self._client.connect(
+                    self.host, port=self.port, username=self.user,
+                    password=self.password, timeout=timeout, allow_agent=False,
+                )
             return ""
-        except paramiko.PasswordRequiredException:
-            # 密钥需要密码
-            return f"SSH 密钥需要密码: {self.key_path}"
-        except paramiko.SSHException:
-            # 密钥认证失败，尝试密码
-            return self._connect_with_password()
+        except AuthenticationException:
+            return "认证失败，请检查用户名/密码/密钥"
+        except SSHException as e:
+            return f"SSH 错误: {e}"
+        except TimeoutError:
+            return "连接超时，请检查网络和主机地址"
         except Exception as e:
-            return f"SSH 连接失败: {e}"
+            return f"连接失败: {e}"
 
-    def _connect_with_password(self) -> str:
-        """尝试密码认证"""
-        import getpass
-        password = getpass.getpass(f"{self.user}@{self.host} 密码: ")
+    def exec(self, command: str, timeout: int = 60) -> tuple[int, str, str]:
+        """执行远程命令，返回 (exit_code, stdout, stderr)"""
+        if not self._client:
+            return -1, "", "未连接"
         try:
-            self.client.connect(
-                self.host, port=self.port, username=self.user,
-                password=password, timeout=10, banner_timeout=30
-            )
-            return ""
-        except Exception as e:
-            return f"密码认证失败: {e}"
-
-    def exec(self, command: str, timeout: int = 60) -> Tuple[str, str, int]:
-        """执行远程命令，返回 (stdout, stderr, exit_code)"""
-        if not self.client:
-            return "", "SSH 未连接", -1
-        try:
-            _, stdout, stderr = self.client.exec_command(command, timeout=timeout)
+            _, stdout, stderr = self._client.exec_command(command, timeout=timeout)
             exit_code = stdout.channel.recv_exit_status()
-            return stdout.read().decode("utf-8", errors="replace"), \
-                   stderr.read().decode("utf-8", errors="replace"), exit_code
+            return exit_code, stdout.read().decode("utf-8", errors="replace"), stderr.read().decode("utf-8", errors="replace")
         except Exception as e:
-            return "", str(e), -1
-
-    def exec_sudo(self, command: str, timeout: int = 120) -> Tuple[str, str, int]:
-        """执行 sudo 命令"""
-        return self.exec(f"sudo -S {command}", timeout=timeout)
-
-    def upload_file(self, local_path: str, remote_path: str) -> str:
-        """通过 SFTP 上传文件，返回空字符串表示成功"""
-        if not self.client:
-            return "SSH 未连接"
-        try:
-            sftp = self.client.open_sftp()
-            sftp.put(local_path, remote_path)
-            sftp.close()
-            return ""
-        except Exception as e:
-            return f"上传失败: {e}"
-
-    def file_exists(self, remote_path: str) -> bool:
-        """检查远程文件是否存在"""
-        out, _, _ = self.exec(f"test -f {remote_path} && echo 'EXISTS' || echo 'NOT_EXISTS'")
-        return "EXISTS" in out
+            return -1, "", str(e)
 
     def close(self):
-        if self.client:
-            self.client.close()
-            self.client = None
+        if self._client:
+            self._client.close()
+            self._client = None
+
+    def is_connected(self) -> bool:
+        return self._client is not None

@@ -1,72 +1,72 @@
-"""内置常见问题库"""
+"""内置常见错误库"""
 
-ERROR_FIXES = [
-    {
-        "keywords": ["nouveau", "Nouveau", "NVIDIA kernel module"],
-        "title": "Nouveau 驱动冲突",
-        "fix": (
-            'echo "blacklist nouveau" | sudo tee /etc/modprobe.d/blacklist-nvidia-nouveau.conf '
-            '&& echo "options nouveau modeset=0" | sudo tee -a /etc/modprobe.d/blacklist-nvidia-nouveau.conf '
-            "&& sudo update-initramfs -u && echo '请重启服务器后继续'"
-        ),
+COMMON_ERRORS = {
+    "no_device": {
+        "pattern": "No devices were found",
+        "title": "未检测到 NVIDIA 显卡",
+        "solution": "请检查服务器是否有 NVIDIA GPU。执行: lspci | grep -i nvidia",
     },
-    {
-        "keywords": ["gcc", "compiler", "build-essential"],
-        "title": "缺少 GCC 编译环境",
-        "fix": (
-            "sudo apt-get update && sudo apt-get install -y gcc-12 build-essential "
-            "&& sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 100 "
-            "&& sudo update-alternatives --set gcc /usr/bin/gcc-12"
-        ),
+    "nouveau_loaded": {
+        "pattern": "Failed to initialize NVML",
+        "title": "nouveau 驱动冲突",
+        "solution": "nouveau 开源驱动未禁用。请在安装前执行安装流程中的禁用 nouveau 步骤。",
     },
-    {
-        "keywords": ["kernel header", "linux-headers", "kernel-devel"],
-        "title": "缺少内核头文件",
-        "fix": "sudo apt-get update && sudo apt-get install -y linux-headers-$(uname -r)",
+    "kernel_headers_missing": {
+        "pattern": "Unable to find the kernel source tree",
+        "title": "内核头文件缺失",
+        "solution": "执行: sudo apt install linux-headers-$(uname -r) -y",
     },
-    {
-        "keywords": ["X server", "x server", "display"],
-        "title": "X Server 正在运行",
-        "fix": "sudo service gdm3 stop || sudo service lightdm stop || sudo init 3",
+    "secureboot_enabled": {
+        "pattern": "Secure Boot not enabled",
+        "title": "Secure Boot 已启用",
+        "solution": "需要在 BIOS 中禁用 Secure Boot，或使用 mokutil 签名驱动模块。",
     },
-    {
-        "keywords": ["failed to download", "connection timed out", "404 Not Found"],
-        "title": "下载失败",
-        "fix": "请检查网络连接，或更换镜像源：https://mirror.sjtu.edu.cn/nvidia/",
+    "gcc_missing": {
+        "pattern": "Unable to find a suitable C compiler",
+        "title": "GCC 编译器缺失",
+        "solution": "执行: sudo apt install build-essential -y",
     },
-    {
-        "keywords": ["permission denied", "not permitted"],
+    "gcc_version": {
+        "pattern": "The compiler version is too old",
+        "title": "GCC 版本过旧",
+        "solution": "安装较新版本 GCC: sudo apt install gcc-12 g++-12 -y",
+    },
+    "cuda_toolkit_missing": {
+        "pattern": "command not found: nvcc",
+        "title": "CUDA Toolkit 未安装",
+        "solution": "请在 CUDA 页面下载并安装 CUDA Toolkit。",
+    },
+    "cuda_version_mismatch": {
+        "pattern": "CUDA version mismatch",
+        "title": "CUDA 版本不匹配",
+        "solution": "驱动版本与 CUDA 版本不兼容。请参考 NVIDIA 兼容性矩阵。",
+    },
+    "dkms_fail": {
+        "pattern": "Unable to build the NVIDIA kernel module through DKMS",
+        "title": "DKMS 构建失败",
+        "solution": "检查内核头文件是否安装完整，尝试手动构建: sudo dkms install -m nvidia -v <version>",
+    },
+    "permission_denied": {
+        "pattern": "Permission denied",
         "title": "权限不足",
-        "fix": "请在命令前加 sudo，或使用 root 用户执行",
+        "solution": "请确保使用 sudo 执行或具有 root 权限。",
     },
-    {
-        "keywords": ["secure boot", "Secure Boot", "MOK"],
-        "title": "Secure Boot 阻止加载模块",
-        "fix": "重启进入 BIOS → Security → Secure Boot → Disabled",
+    "xserver_running": {
+        "pattern": "You appear to be running an X server",
+        "title": "X Server 正在运行",
+        "solution": "请停止 X Server 或进入 runlevel 3: sudo systemctl isolate multi-user.target",
     },
-    {
-        "keywords": ["dkms", "DKMS", "Failed to build"],
-        "title": "DKMS 内核模块编译失败",
-        "fix": "sudo apt-get install -y dkms && sudo dkms install -m nvidia -v $(ls /usr/src/nvidia-*/ 2>/dev/null | head -1)",
+    "disk_full": {
+        "pattern": "No space left on device",
+        "title": "磁盘空间不足",
+        "solution": "清理磁盘空间: sudo apt autoremove && sudo journalctl --vacuum-size=500M",
     },
-    {
-        "keywords": ["already installed", "already exists"],
-        "title": "驱动已存在",
-        "fix": "sudo nvidia-uninstall && sudo apt-get purge -y '*nvidia*' && sudo apt-get autoremove -y",
-    },
-    {
-        "keywords": ["not supported", "unsupported"],
-        "title": "驱动版本不兼容",
-        "fix": "请使用 https://www.nvidia.com/Download/Find.aspx 查询兼容版本",
-    },
-]
+}
 
 
-def find_known_error(stderr: str) -> dict:
-    """在本地查找匹配的错误修复方案"""
-    stderr_lower = stderr.lower()
-    for ef in ERROR_FIXES:
-        for kw in ef["keywords"]:
-            if kw.lower() in stderr_lower:
-                return ef
-    return {}
+def match_error(text: str) -> dict | None:
+    """在输出文本中匹配已知错误"""
+    for key, info in COMMON_ERRORS.items():
+        if info["pattern"].lower() in text.lower():
+            return info
+    return None

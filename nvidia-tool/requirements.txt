@@ -1,4 +1,2 @@
-paramiko
-requests
-pyinstaller
-PyQt5
+paramiko>=3.4.0
+PyQt5>=5.15.9

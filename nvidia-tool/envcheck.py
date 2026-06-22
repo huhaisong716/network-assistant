@@ -1,95 +1,82 @@
-"""环境检查 - SSH 远程检查并自动修复"""
+"""5 项环境检查：gcc/nouveau/secureboot/内核头文件/build-essential"""
+
+CHECK_ITEMS = [
+    "gcc",
+    "nouveau_disabled",
+    "secureboot_disabled",
+    "kernel_headers",
+    "build_essential",
+]
+
+CHECK_LABELS = {
+    "gcc": "GCC 编译器",
+    "nouveau_disabled": "nouveau 驱动已禁用",
+    "secureboot_disabled": "Secure Boot 已禁用",
+    "kernel_headers": "内核头文件已安装",
+    "build_essential": "build-essential 已安装",
+}
 
 
-def check_env(ssh) -> list:
-    """运行所有环境检查"""
-    results = []
-    results.append(_check_gcc(ssh))
-    results.append(_check_nouveau(ssh))
-    results.append(_check_secure_boot(ssh))
-    results.append(_check_kernel_headers(ssh))
-    results.append(_check_build_essential(ssh))
-    return results
+class EnvChecker:
+    def __init__(self, ssh):
+        self.ssh = ssh
+        self.results: dict[str, tuple[bool, str]] = {}  # key -> (ok, detail)
 
+    def check_gcc(self):
+        ec, out, _ = self.ssh.exec("gcc --version 2>/dev/null | head -1")
+        if ec == 0 and out.strip():
+            self.results["gcc"] = (True, out.strip())
+        else:
+            self.results["gcc"] = (False, "未安装")
 
-def _check_gcc(ssh) -> dict:
-    out, _, code = ssh.exec("gcc --version 2>/dev/null | head -1")
-    if code != 0 or not out.strip():
-        return {
-            "name": "gcc", "status": "fail", "detail": "未安装",
-            "fix_cmd": (
-                "apt-get update -qq && apt-get install -y gcc-12 build-essential "
-                "&& update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 100 "
-                "&& update-alternatives --set gcc /usr/bin/gcc-12"
-            ),
+    def check_nouveau(self):
+        ec, out, _ = self.ssh.exec("lsmod | grep nouveau 2>/dev/null")
+        if out.strip():
+            self.results["nouveau_disabled"] = (False, "nouveau 模块已加载")
+        else:
+            self.results["nouveau_disabled"] = (True, "已禁用")
+
+    def check_secureboot(self):
+        ec, out, _ = self.ssh.exec("mokutil --sb-state 2>/dev/null")
+        if "enabled" in out.lower():
+            self.results["secureboot_disabled"] = (False, "Secure Boot 已启用")
+        else:
+            self.results["secureboot_disabled"] = (True, "已禁用或 mokutil 未安装")
+
+    def check_kernel_headers(self):
+        ec, out, _ = self.ssh.exec("dpkg -l | grep linux-headers-$(uname -r) 2>/dev/null")
+        if ec == 0 and out.strip():
+            self.results["kernel_headers"] = (True, "已安装")
+        else:
+            self.results["kernel_headers"] = (False, "未安装")
+
+    def check_build_essential(self):
+        ec, out, _ = self.ssh.exec("dpkg -l | grep build-essential 2>/dev/null")
+        if ec == 0 and out.strip():
+            self.results["build_essential"] = (True, "已安装")
+        else:
+            self.results["build_essential"] = (False, "未安装")
+
+    def check_all(self, progress_callback=None):
+        total = len(CHECK_ITEMS)
+        for i, name in enumerate(CHECK_ITEMS):
+            getattr(self, f"check_{name}")()
+            if progress_callback:
+                progress_callback(i + 1, total, CHECK_LABELS.get(name, name))
+
+    def all_pass(self) -> bool:
+        return all(ok for ok, _ in self.results.values())
+
+    def fix_command(self, name: str) -> str | None:
+        """返回修复命令"""
+        cmds = {
+            "gcc": "apt install -y gcc g++",
+            "nouveau_disabled": "bash -c 'echo \"blacklist nouveau\" > /etc/modprobe.d/blacklist-nvidia-nouveau.conf && update-initramfs -u'",
+            "secureboot_disabled": "echo '请在 BIOS 中禁用 Secure Boot（无法通过命令行修复）'",
+            "kernel_headers": "apt install -y linux-headers-$(uname -r)",
+            "build_essential": "apt install -y build-essential",
         }
-    return {"name": "gcc", "status": "ok", "detail": f"已安装: {out.strip()}", "fix_cmd": ""}
+        return cmds.get(name)
 
-
-def _check_nouveau(ssh) -> dict:
-    out, _, _ = ssh.exec("lsmod | grep nouveau 2>/dev/null")
-    if out.strip():
-        return {
-            "name": "nouveau", "status": "fail", "detail": "Nouveau 未禁用",
-            "fix_cmd": (
-                'echo "blacklist nouveau" | sudo tee /etc/modprobe.d/blacklist-nvidia-nouveau.conf > /dev/null '
-                '&& echo "options nouveau modeset=0" | sudo tee -a /etc/modprobe.d/blacklist-nvidia-nouveau.conf > /dev/null '
-                "&& sudo update-initramfs -u"
-            ),
-        }
-    out, _, _ = ssh.exec("cat /etc/modprobe.d/blacklist-nvidia-nouveau.conf 2>/dev/null")
-    if "blacklist nouveau" in out:
-        return {"name": "nouveau", "status": "ok", "detail": "已禁用（需重启生效）", "fix_cmd": ""}
-    return {"name": "nouveau", "status": "ok", "detail": "未加载", "fix_cmd": ""}
-
-
-def _check_secure_boot(ssh) -> dict:
-    out, _, code = ssh.exec("mokutil --sb-state 2>/dev/null")
-    if code != 0 or not out.strip():
-        return {"name": "secureboot", "status": "ok", "detail": "无法检测（mokutil 不可用）", "fix_cmd": ""}
-    if "enabled" in out.lower():
-        return {
-            "name": "secureboot", "status": "fail", "detail": "Secure Boot 已启用",
-            "fix_cmd": "重启服务器，进入 BIOS → Security → Secure Boot → Disabled",
-        }
-    return {"name": "secureboot", "status": "ok", "detail": "已关闭", "fix_cmd": ""}
-
-
-def _check_kernel_headers(ssh) -> dict:
-    out, _, code = ssh.exec("uname -r 2>/dev/null")
-    if code != 0 or not out.strip():
-        return {"name": "kernel_headers", "status": "skip", "detail": "无法获取内核版本", "fix_cmd": ""}
-    kernel = out.strip()
-    out, _, _ = ssh.exec(f"dpkg -l | grep linux-headers-{kernel} 2>/dev/null")
-    if not out.strip():
-        return {
-            "name": "kernel_headers", "status": "fail",
-            "detail": f"未安装 (内核 {kernel})",
-            "fix_cmd": f"apt-get update -qq && apt-get install -y linux-headers-{kernel}",
-        }
-    return {"name": "kernel_headers", "status": "ok", "detail": f"已安装 ({kernel})", "fix_cmd": ""}
-
-
-def _check_build_essential(ssh) -> dict:
-    out, _, code = ssh.exec("dpkg -l build-essential 2>/dev/null | grep '^ii'")
-    if code != 0 or not out.strip():
-        return {
-            "name": "build_essential", "status": "fail", "detail": "未安装",
-            "fix_cmd": "apt-get update -qq && apt-get install -y build-essential",
-        }
-    return {"name": "build_essential", "status": "ok", "detail": "已安装", "fix_cmd": ""}
-
-
-def fix_env(ssh, result: dict) -> str:
-    """执行环境修复命令"""
-    cmd = result.get("fix_cmd", "")
-    if not cmd:
-        return ""
-    print(f"\n  修复 {result['name']}...")
-    out, err, code = ssh.exec(cmd, timeout=120)
-    output = out + err
-    if code != 0:
-        print(f"  ❌ 修复失败: {output[:200]}")
-    else:
-        print(f"  ✅ 修复完成")
-    return output
+    def get_failed_items(self) -> list[str]:
+        return [k for k, (ok, _) in self.results.items() if not ok]

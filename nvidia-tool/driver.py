@@ -1,67 +1,52 @@
-"""驱动版本匹配与下载"""
-
+"""NVIDIA 驱动版本匹配与下载 URL"""
 import re
+from dataclasses import dataclass
+from typing import Optional
 
-# 驱动索引：显卡前缀 → 最低推荐驱动版本
-# 新显卡需要新版驱动
-GPU_DRIVER_MIN = [
-    (re.compile(r"RTX 50\d{2}", re.I), "570"),
-    (re.compile(r"RTX 40\d{2}", re.I), "550"),
-    (re.compile(r"RTX 30\d{2}", re.I), "525"),
-    (re.compile(r"RTX 20\d{2}", re.I), "470"),
-    (re.compile(r"GTX 16\d{2}", re.I), "470"),
-    (re.compile(r"GTX 10\d{2}", re.I), "470"),
-    (re.compile(r"\bA100\b|\bA\d+\b|\bH100\b|\bH200\b", re.I), "550"),
-    (re.compile(r"\bV100\b|\bP100\b|\bK80\b", re.I), "470"),
-]
 
-# 驱动列表
-ALL_DRIVERS = [
-    {"version": "570.133.00", "branch": "stable", "cuda": "12.8",
-     "url": "https://us.download.nvidia.com/XFree86/Linux-x86_64/570.133.00/NVIDIA-Linux-x86_64-570.133.00.run",
-     "notes": "RTX 50xx 系列推荐"},
-    {"version": "570.124.06", "branch": "stable", "cuda": "12.8",
-     "url": "https://us.download.nvidia.com/XFree86/Linux-x86_64/570.124.06/NVIDIA-Linux-x86_64-570.124.06.run",
-     "notes": ""},
-    {"version": "560.35.03", "branch": "stable", "cuda": "12.7",
-     "url": "https://us.download.nvidia.com/XFree86/Linux-x86_64/560.35.03/NVIDIA-Linux-x86_64-560.35.03.run",
-     "notes": ""},
-    {"version": "550.144.03", "branch": "lts", "cuda": "12.6",
-     "url": "https://us.download.nvidia.com/XFree86/Linux-x86_64/550.144.03/NVIDIA-Linux-x86_64-550.144.03.run",
-     "notes": "LTS 分支，推荐生产环境"},
-    {"version": "550.142.00", "branch": "lts", "cuda": "12.6",
-     "url": "https://us.download.nvidia.com/XFree86/Linux-x86_64/550.142.00/NVIDIA-Linux-x86_64-550.142.00.run",
-     "notes": ""},
-    {"version": "535.216.03", "branch": "lts", "cuda": "12.4",
-     "url": "https://us.download.nvidia.com/XFree86/Linux-x86_64/535.216.03/NVIDIA-Linux-x86_64-535.216.03.run",
-     "notes": "旧版 LTS，兼容性好"},
-    {"version": "525.147.05", "branch": "lts", "cuda": "12.2",
-     "url": "https://us.download.nvidia.com/XFree86/Linux-x86_64/525.147.05/NVIDIA-Linux-x86_64-525.147.05.run",
-     "notes": "最后支持 GTX 10xx"},
-    {"version": "470.256.02", "branch": "legacy", "cuda": "11.4",
-     "url": "https://us.download.nvidia.com/XFree86/Linux-x86_64/470.256.02/NVIDIA-Linux-x86_64-470.256.02.run",
-     "notes": "Legacy，仅老显卡"},
+@dataclass
+class DriverInfo:
+    version: str
+    url: str
+    is_recommended: bool = False
+
+
+# 已知稳定版驱动（Linux x86_64）
+RECOMMENDED_DRIVERS = [
+    DriverInfo("550.144.03", "https://us.download.nvidia.com/XFree86/Linux-x86_64/550.144.03/NVIDIA-Linux-x86_64-550.144.03.run", True),
+    DriverInfo("535.216.03", "https://us.download.nvidia.com/XFree86/Linux-x86_64/535.216.03/NVIDIA-Linux-x86_64-535.216.03.run", True),
+    DriverInfo("525.147.05", "https://us.download.nvidia.com/XFree86/Linux-x86_64/525.147.05/NVIDIA-Linux-x86_64-525.147.05.run", True),
+    DriverInfo("470.256.02", "https://us.download.nvidia.com/XFree86/Linux-x86_64/470.256.02/NVIDIA-Linux-x86_64-470.256.02.run", False),
+    DriverInfo("390.157", "https://us.download.nvidia.com/XFree86/Linux-x86_64/390.157/NVIDIA-Linux-x86_64-390.157.run", False),
 ]
 
 
-def recommend_drivers(gpu_model: str) -> list:
-    """根据显卡型号推荐驱动版本"""
-    min_ver = ""
-    for pattern, version in GPU_DRIVER_MIN:
-        if pattern.search(gpu_model):
-            min_ver = version
-            break
-
-    recommended = []
-    for d in ALL_DRIVERS:
-        if not min_ver or d["version"][:3] >= min_ver:
-            recommended.append(d)
-    return recommended if recommended else ALL_DRIVERS
-
-
-def get_driver_url(version: str) -> str:
-    """获取指定版本的下载 URL"""
-    for d in ALL_DRIVERS:
-        if d["version"] == version:
-            return d["url"]
+def get_download_url(version: str) -> Optional[str]:
+    """根据版本号构造下载 URL"""
+    for d in RECOMMENDED_DRIVERS:
+        if d.version == version:
+            return d.url
+    # 尝试构造通用 URL
+    major = version.split(".")[0] if "." in version else version
     return f"https://us.download.nvidia.com/XFree86/Linux-x86_64/{version}/NVIDIA-Linux-x86_64-{version}.run"
+
+
+def get_recommended_for_gpu(model: str) -> DriverInfo:
+    """根据 GPU 型号推荐驱动版本"""
+    if any(x in model.upper() for x in ["RTX 40", "RTX 50", "A100", "H100", "A40"]):
+        return RECOMMENDED_DRIVERS[0]  # 550
+    elif any(x in model.upper() for x in ["RTX 30", "RTX 20", "T4", "RTX A"]):
+        return RECOMMENDED_DRIVERS[1]  # 535
+    else:
+        return RECOMMENDED_DRIVERS[2]  # 525
+
+
+def parse_latest_stable(html: str) -> Optional[str]:
+    """从 NVIDIA 官网页面提取最新稳定版号"""
+    m = re.search(r"Latest\s*Production\s*Branch:\s*(\S+)", html, re.I)
+    if m:
+        return m.group(1)
+    m = re.search(r"NVIDIA-Linux-x86_64-([\d.]+)\.run", html)
+    if m:
+        return m.group(1)
+    return None

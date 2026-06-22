@@ -1,1429 +1,1030 @@
 #!/usr/bin/env python3
-"""nvidia-tool PyQt5 桌面版 - GPU 驱动安装向导"""
+"""NVIDIA Tools — PyQt5 桌面版（7步向导）"""
 
 import sys
 import os
-import time
-import traceback
-from datetime import datetime
-from typing import Optional
+import json
+import threading
+from pathlib import Path
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QStackedWidget, QPushButton, QComboBox, QLabel, QListWidget,
-    QListWidgetItem, QTableWidget, QTableWidgetItem, QProgressBar,
-    QTextEdit, QCheckBox, QLineEdit, QMessageBox, QFileDialog,
-    QInputDialog, QDialog, QFormLayout, QSpinBox, QFrame, QHeaderView,
-    QSizePolicy, QDialogButtonBox, QStatusBar, QGroupBox, QAbstractItemView,
+    QStackedWidget, QPushButton, QLabel, QComboBox, QLineEdit,
+    QListWidget, QListWidgetItem, QTableWidget, QTableWidgetItem,
+    QCheckBox, QProgressBar, QTextEdit, QMessageBox, QFileDialog,
+    QGroupBox, QFormLayout, QSpinBox, QFrame, QHeaderView, QStatusBar,
+    QSplitter,
 )
-from PyQt5.QtCore import Qt, QThread, QObject, pyqtSignal, QTimer, QSize
-from PyQt5.QtGui import QFont, QColor, QIcon, QPixmap, QPalette, QTextCursor
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject
+from PyQt5.QtGui import QFont, QColor, QPalette, QIcon
 
 # ── 后端模块 ──────────────────────────────────────────────
-from config import load_config, save_config, Server, Config, get_log_dir
+from config import get_servers, add_server, remove_server, get_deepseek_key, set_deepseek_key
 from ssh_client import SSHClient
 from gpu import detect_gpu
-from driver import recommend_drivers, get_driver_url
-from envcheck import check_env, fix_env
-from installer import disable_nouveau, download_driver, run_installer, verify_installation
-from cuda import recommend_cuda, install_cuda
-from cudnn import recommend_cudnn, install_cudnn
-from ai_diagnose import diagnose
-from errors import find_known_error
+from driver import RECOMMENDED_DRIVERS, get_recommended_for_gpu, get_download_url
+from envcheck import EnvChecker, CHECK_LABELS
+from installer import Installer
+from cuda import install_cuda, get_cuda_versions
+from cudnn import install_cudnn, get_cudnn_versions
+from ai_diagnose import diagnose_with_deepseek
 
 # ── 品牌配色 ──────────────────────────────────────────────
 DEEP_BLUE = "#005696"
 BRIGHT_BLUE = "#00B0F0"
 GOLD = "#FFC000"
-BG_LIGHT = "#F5F7FA"
-SUCCESS_GREEN = "#27AE60"
-ERROR_RED = "#E74C3C"
+WHITE = "#FFFFFF"
+LIGHT_GRAY = "#F5F5F5"
+DARK_TEXT = "#333333"
+GREEN_OK = "#27AE60"
+RED_ERR = "#E74C3C"
 
-APP_STYLE = f"""
-QMainWindow, QWidget {{
-    background-color: {BG_LIGHT};
-    font-family: "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", sans-serif;
-    font-size: 13px;
-}}
-QPushButton {{
-    background-color: {DEEP_BLUE};
-    color: white;
-    border: none;
-    padding: 8px 20px;
-    border-radius: 4px;
-    font-size: 13px;
-    min-height: 20px;
-}}
-QPushButton:hover {{
-    background-color: {BRIGHT_BLUE};
-}}
-QPushButton:pressed {{
-    background-color: #004070;
-}}
-QPushButton:disabled {{
-    background-color: #B0BEC5;
-    color: #90A4AE;
-}}
-QPushButton#btnPrev, QPushButton#btnNext {{
-    padding: 10px 30px;
-    font-size: 14px;
-    min-width: 100px;
-}}
-QPushButton#btnNext {{
-    background-color: {GOLD};
-    color: #333;
-}}
-QPushButton#btnNext:hover {{
-    background-color: #FFD54F;
-}}
-QComboBox {{
-    padding: 6px 12px;
-    border: 1px solid #CCC;
-    border-radius: 4px;
-    background: white;
-    min-height: 20px;
-}}
-QComboBox:focus {{
-    border-color: {BRIGHT_BLUE};
-}}
-QLineEdit, QSpinBox {{
-    padding: 6px 12px;
-    border: 1px solid #CCC;
-    border-radius: 4px;
-    background: white;
-    min-height: 20px;
-}}
-QLineEdit:focus, QSpinBox:focus {{
-    border-color: {BRIGHT_BLUE};
-}}
-QTableWidget, QListWidget, QTextEdit {{
-    border: 1px solid #DDD;
-    border-radius: 4px;
-    background: white;
-    alternate-background-color: #F0F4F8;
-}}
-QHeaderView::section {{
-    background-color: {DEEP_BLUE};
-    color: white;
-    padding: 6px;
-    border: none;
-    font-weight: bold;
-}}
-QProgressBar {{
-    border: 1px solid #DDD;
-    border-radius: 4px;
-    text-align: center;
-    height: 24px;
-    background: white;
-}}
-QProgressBar::chunk {{
-    background-color: {BRIGHT_BLUE};
-    border-radius: 3px;
-}}
-QGroupBox {{
-    font-weight: bold;
-    border: 1px solid #DDD;
-    border-radius: 4px;
-    margin-top: 12px;
-    padding-top: 16px;
-}}
-QGroupBox::title {{
-    subcontrol-origin: margin;
-    left: 12px;
-    padding: 0 6px;
-    color: {DEEP_BLUE};
-}}
-QStatusBar {{
-    background: {DEEP_BLUE};
-    color: white;
-    font-size: 12px;
-}}
-QLabel#pageTitle {{
-    font-size: 18px;
-    font-weight: bold;
-    color: {DEEP_BLUE};
-    padding: 10px 0;
-}}
-"""
+# ── 页面定义 ──────────────────────────────────────────────
+PAGES = ["服务器", "显卡检测", "驱动选择", "环境检查", "安装", "CUDA/cuDNN", "报告"]
+PAGE_COUNT = len(PAGES)
 
 
-# ═══════════════════════════════════════════════════════════
-# Worker — 后台线程执行长时间任务
-# ═══════════════════════════════════════════════════════════
-class Worker(QObject):
-    """在 QThread 中执行 fn(*args, **kwargs)，通过信号汇报结果"""
-    started = pyqtSignal()
-    progress = pyqtSignal(int, str)   # (percent, message)
-    log = pyqtSignal(str)             # 追加日志行
-    finished = pyqtSignal(object)     # 返回值
-    error = pyqtSignal(str)           # 错误消息
-
-    def __init__(self, fn, *args, **kwargs):
-        super().__init__()
-        self.fn = fn
-        self.args = args
-        self.kwargs = kwargs
-
-    def run(self):
-        self.started.emit()
-        try:
-            result = self.fn(*self.args, **self.kwargs)
-            self.finished.emit(result)
-        except Exception as e:
-            tb = traceback.format_exc()
-            self.error.emit(f"{e}\n{tb}")
-
-    def stop(self):
-        """在子类中可重写以支持取消"""
-        pass
+# ── 信号桥（跨线程更新 UI） ──────────────────────────────
+class SignalBridge(QObject):
+    log_signal = pyqtSignal(str)
+    progress_signal = pyqtSignal(int, int, str)
+    step_signal = pyqtSignal(int)
+    done_signal = pyqtSignal(bool, str)
+    gpu_signal = pyqtSignal(object)
+    env_signal = pyqtSignal(dict)
+    check_signal = pyqtSignal(bool)
+    verify_signal = pyqtSignal(bool, str)
 
 
-def run_in_thread(target, callback, error_callback=None, progress_callback=None,
-                  log_callback=None):
-    """快捷启动一个 worker 线程"""
-    thread = QThread()
-    worker = Worker(target)
-    worker.moveToThread(thread)
-
-    thread.started.connect(worker.run)
-    worker.finished.connect(thread.quit)
-    worker.finished.connect(worker.deleteLater)
-    thread.finished.connect(thread.deleteLater)
-    if error_callback:
-        worker.error.connect(error_callback)
-    if progress_callback:
-        worker.progress.connect(progress_callback)
-    if log_callback:
-        worker.log.connect(log_callback)
-    if callback:
-        worker.finished.connect(callback)
-        worker.error.connect(lambda e: callback(None))
-
-    thread.start()
-    return thread, worker
-
-
-# ═══════════════════════════════════════════════════════════
-# 新增/编辑服务器对话框
-# ═══════════════════════════════════════════════════════════
-class ServerDialog(QDialog):
-    def __init__(self, parent=None, server: Optional[Server] = None):
-        super().__init__(parent)
-        self.server = server or Server()
-        self.setWindowTitle("编辑服务器" if server else "新增服务器")
-        self.setModal(True)
-        self.resize(400, 280)
-        self._build_ui()
-        self._load_data()
-
-    def _build_ui(self):
-        layout = QFormLayout(self)
-        layout.setSpacing(10)
-        layout.setContentsMargins(20, 20, 20, 20)
-
-        self.edit_name = QLineEdit()
-        self.edit_name.setPlaceholderText("例如: 办公区 GPU 节点")
-        layout.addRow("名称:", self.edit_name)
-
-        self.edit_host = QLineEdit()
-        self.edit_host.setPlaceholderText("IP 地址或域名")
-        layout.addRow("地址:", self.edit_host)
-
-        self.edit_port = QSpinBox()
-        self.edit_port.setRange(1, 65535)
-        self.edit_port.setValue(22)
-        layout.addRow("端口:", self.edit_port)
-
-        self.edit_user = QLineEdit()
-        self.edit_user.setPlaceholderText("默认: root")
-        layout.addRow("用户名:", self.edit_user)
-
-        self.edit_key = QLineEdit()
-        self.edit_key.setPlaceholderText("默认: ~/.ssh/id_rsa")
-        layout.addRow("私钥路径:", self.edit_key)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self._accept)
-        buttons.rejected.connect(self.reject)
-        layout.addRow(buttons)
-
-    def _load_data(self):
-        s = self.server
-        self.edit_name.setText(s.name)
-        self.edit_host.setText(s.host)
-        self.edit_port.setValue(s.port)
-        self.edit_user.setText(s.user)
-        self.edit_key.setText(s.key_path)
-
-    def _accept(self):
-        if not self.edit_name.text().strip():
-            QMessageBox.warning(self, "提示", "请输入服务器名称")
-            return
-        if not self.edit_host.text().strip():
-            QMessageBox.warning(self, "提示", "请输入服务器地址")
-            return
-
-        self.server.name = self.edit_name.text().strip()
-        self.server.host = self.edit_host.text().strip()
-        self.server.port = self.edit_port.value()
-        self.server.user = self.edit_user.text().strip() or "root"
-        self.server.key_path = self.edit_key.text().strip() or "~/.ssh/id_rsa"
-        self.accept()
-
-
-# ═══════════════════════════════════════════════════════════
-# 页面 1: 服务器选择
-# ═══════════════════════════════════════════════════════════
-class ServerPage(QWidget):
-    connected = pyqtSignal(object)  # 连接成功后发射 SSHClient
-
+# ── 底部状态栏部件 ──────────────────────────────────────
+class BottomBar(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.main = parent
-        self._build_ui()
-        self._refresh_servers()
+        self.setFixedHeight(48)
+        self.setStyleSheet(f"background-color: {DEEP_BLUE};")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(16, 6, 16, 6)
 
-    def _build_ui(self):
+        self.btn_prev = QPushButton("← 上一步")
+        self.btn_prev.setFixedWidth(110)
+        self.btn_prev.setEnabled(False)
+        self.btn_prev.setStyleSheet(self._btn_style(WHITE, DEEP_BLUE))
+
+        self.page_label = QLabel("1 / 7")
+        self.page_label.setStyleSheet(f"color: {GOLD}; font-weight: bold; font-size: 13px;")
+        self.page_label.setAlignment(Qt.AlignCenter)
+
+        self.btn_next = QPushButton("下一步 →")
+        self.btn_next.setFixedWidth(110)
+        self.btn_next.setStyleSheet(self._btn_style(GOLD, "#2C3E50"))
+
+        self.server_label = QLabel("未连接")
+        self.server_label.setStyleSheet(f"color: {WHITE}; font-size: 12px;")
+        self.server_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        self.status_light = QLabel("●")
+        self.status_light.setStyleSheet(f"color: {RED_ERR}; font-size: 18px;")
+        self.status_light.setFixedWidth(20)
+
+        layout.addWidget(self.btn_prev)
+        layout.addWidget(self.page_label)
+        layout.addStretch()
+        layout.addWidget(self.server_label)
+        layout.addWidget(self.status_light)
+        layout.addWidget(self.btn_next)
+
+    def _btn_style(self, text_color, bg_color):
+        return (
+            f"QPushButton {{ background-color: {bg_color}; color: {text_color}; "
+            f"border: 1px solid {WHITE}; border-radius: 4px; padding: 6px 12px; "
+            f"font-size: 13px; font-weight: bold; }}"
+            f"QPushButton:disabled {{ opacity: 0.5; }}"
+        )
+
+    def set_server(self, name: str, connected: bool):
+        self.server_label.setText(name or "未连接")
+        self.status_light.setStyleSheet(
+            f"color: {GREEN_OK}; font-size: 18px;" if connected
+            else f"color: {RED_ERR}; font-size: 18px;"
+        )
+
+    def set_page(self, idx: int):
+        self.page_label.setText(f"{idx + 1} / {PAGE_COUNT}")
+        self.btn_prev.setEnabled(idx > 0)
+        self.btn_next.setText("完成" if idx == PAGE_COUNT - 1 else "下一步 →")
+
+
+# ── 页面 1: 服务器配置 ──────────────────────────────────
+class ServerPage(QWidget):
+    def __init__(self, bridge: SignalBridge):
+        super().__init__()
+        self.bridge = bridge
+        self._ssh: SSHClient | None = None
+        self._init_ui()
+        self._load_servers()
+
+    def _init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(30, 10, 30, 10)
+        layout.setContentsMargins(24, 20, 24, 20)
 
-        title = QLabel("选择目标服务器")
-        title.setObjectName("pageTitle")
+        title = QLabel("🔧 服务器连接")
+        title.setStyleSheet(f"font-size: 18px; font-weight: bold; color: {DEEP_BLUE};")
         layout.addWidget(title)
 
-        layout.addWidget(QLabel("选择一个已保存的服务器，或新增/编辑服务器列表:"))
+        desc = QLabel("添加或选择要安装驱动的远程服务器")
+        desc.setStyleSheet(f"color: {DARK_TEXT}; font-size: 13px; margin-bottom: 12px;")
+        layout.addWidget(desc)
 
-        # 服务器下拉
-        self.combo_server = QComboBox()
-        self.combo_server.setMinimumHeight(32)
-        layout.addWidget(self.combo_server)
+        # 已保存服务器列表
+        group = QGroupBox("已保存的服务器")
+        group.setStyleSheet(f"QGroupBox {{ font-weight: bold; border: 1px solid {BRIGHT_BLUE}; border-radius: 6px; margin-top: 10px; padding-top: 16px; }} QGroupBox::title {{ color: {DEEP_BLUE}; }}")
+        glayout = QVBoxLayout(group)
 
-        # 服务器管理按钮
+        self.server_combo = QComboBox()
+        self.server_combo.setMinimumHeight(32)
+        glayout.addWidget(self.server_combo)
+
         btn_row = QHBoxLayout()
         self.btn_add = QPushButton("➕ 新增")
-        self.btn_add.clicked.connect(self._add_server)
         self.btn_edit = QPushButton("✏️ 编辑")
+        self.btn_del = QPushButton("🗑️ 删除")
+        for b in (self.btn_add, self.btn_edit, self.btn_del):
+            b.setStyleSheet(f"QPushButton {{ background-color: {WHITE}; border: 1px solid {BRIGHT_BLUE}; border-radius: 4px; padding: 6px 14px; color: {DEEP_BLUE}; }} QPushButton:hover {{ background-color: {BRIGHT_BLUE}; color: white; }}")
+        btn_row.addWidget(self.btn_add)
+        btn_row.addWidget(self.btn_edit)
+        btn_row.addWidget(self.btn_del)
+        btn_row.addStretch()
+        glayout.addLayout(btn_row)
+
+        layout.addWidget(group)
+
+        # 连接测试
+        test_group = QGroupBox("连接测试")
+        test_group.setStyleSheet(group.styleSheet())
+        tlayout = QVBoxLayout(test_group)
+        self.btn_test = QPushButton("🔌 测试连接")
+        self.btn_test.setMinimumHeight(36)
+        self.btn_test.setStyleSheet(
+            f"QPushButton {{ background-color: {BRIGHT_BLUE}; color: white; font-weight: bold; "
+            f"border-radius: 6px; padding: 8px 24px; font-size: 14px; }}"
+            f"QPushButton:hover {{ background-color: {DEEP_BLUE}; }}"
+        )
+        tlayout.addWidget(self.btn_test)
+        self.test_result = QLabel("")
+        self.test_result.setStyleSheet(f"font-size: 13px; padding: 4px 0;")
+        tlayout.addWidget(self.test_result)
+        layout.addWidget(test_group)
+
+        # API Key 设置
+        api_group = QGroupBox("DeepSeek API Key（AI 诊断）")
+        api_group.setStyleSheet(group.styleSheet())
+        alayout = QHBoxLayout(api_group)
+        self.api_input = QLineEdit()
+        self.api_input.setPlaceholderText("输入 DeepSeek API Key...")
+        self.api_input.setEchoMode(QLineEdit.Password)
+        self.api_input.setMinimumHeight(30)
+        self.btn_save_api = QPushButton("保存")
+        self.btn_save_api.setStyleSheet(f"QPushButton {{ background-color: {GOLD}; color: {DARK_TEXT}; border-radius: 4px; padding: 6px 14px; font-weight: bold; }}")
+        alayout.addWidget(self.api_input)
+        alayout.addWidget(self.btn_save_api)
+        layout.addWidget(api_group)
+
+        layout.addStretch()
+
+        # 信号连接
+        self.btn_test.clicked.connect(self._test_connection)
+        self.btn_add.clicked.connect(self._add_server)
         self.btn_edit.clicked.connect(self._edit_server)
-        self.btn_delete = QPushButton("🗑️ 删除")
-        self.btn_delete.clicked.connect(self._delete_server)
-        for b in (self.btn_add, self.btn_edit, self.btn_delete):
-            b.setMaximumWidth(100)
-            btn_row.addWidget(b)
+        self.btn_del.clicked.connect(self._del_server)
+        self.btn_save_api.clicked.connect(self._save_api_key)
+        self.server_combo.currentIndexChanged.connect(self._on_server_selected)
+
+    def _load_servers(self):
+        self.server_combo.blockSignals(True)
+        self.server_combo.clear()
+        self.server_combo.addItem("-- 选择服务器 --", None)
+        for s in get_servers():
+            self.server_combo.addItem(f"{s['name']} ({s['host']}:{s['port']})", s)
+        self.server_combo.blockSignals(False)
+        self.api_input.setText(get_deepseek_key())
+
+    def _on_server_selected(self):
+        self.test_result.setText("")
+
+    def get_server_info(self) -> dict | None:
+        data = self.server_combo.currentData()
+        return data
+
+    def get_ssh(self) -> SSHClient | None:
+        return self._ssh
+
+    def _test_connection(self):
+        info = self.get_server_info()
+        if not info:
+            self.test_result.setText("⚠️ 请先选择一个服务器")
+            self.test_result.setStyleSheet(f"color: {RED_ERR}; font-size: 13px;")
+            self.bridge.check_signal.emit(False)
+            return
+
+        self.test_result.setText("🔄 连接中...")
+        self.test_result.setStyleSheet(f"color: {GOLD}; font-size: 13px;")
+        self.btn_test.setEnabled(False)
+
+        def test():
+            ssh = SSHClient(
+                host=info["host"], port=info["port"], user=info["user"],
+                password=info.get("password"), key_path=info.get("key_path"),
+            )
+            err = ssh.connect()
+            if err:
+                self.test_result.setText(f"❌ {err}")
+                self.test_result.setStyleSheet(f"color: {RED_ERR}; font-size: 13px;")
+                self._ssh = None
+                self.bridge.check_signal.emit(False)
+            else:
+                self.test_result.setText(f"✅ 连接成功 → {info['host']}")
+                self.test_result.setStyleSheet(f"color: {GREEN_OK}; font-size: 13px;")
+                self._ssh = ssh
+                self.bridge.check_signal.emit(True)
+            self.btn_test.setEnabled(True)
+
+        threading.Thread(target=test, daemon=True).start()
+
+    def _add_server(self):
+        self._server_dialog("新增服务器", None)
+
+    def _edit_server(self):
+        info = self.get_server_info()
+        if info:
+            self._server_dialog("编辑服务器", info)
+        else:
+            QMessageBox.information(self, "提示", "请先选择一个服务器")
+
+    def _del_server(self):
+        info = self.get_server_info()
+        if info:
+            ret = QMessageBox.question(self, "确认删除", f"删除服务器 [{info['name']}]？")
+            if ret == QMessageBox.Yes:
+                remove_server(info["name"])
+                self._load_servers()
+        else:
+            QMessageBox.information(self, "提示", "请先选择一个服务器")
+
+    def _server_dialog(self, title: str, existing: dict | None):
+        from PyQt5.QtWidgets import QDialog, QDialogButtonBox
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.setFixedSize(420, 320)
+        layout = QFormLayout(dlg)
+
+        name_edit = QLineEdit(existing.get("name", "") if existing else "")
+        host_edit = QLineEdit(existing.get("host", "") if existing else "")
+        port_edit = QSpinBox()
+        port_edit.setRange(1, 65535)
+        port_edit.setValue(existing.get("port", 22) if existing else 22)
+        user_edit = QLineEdit(existing.get("user", "root") if existing else "root")
+
+        auth_combo = QComboBox()
+        auth_combo.addItems(["密码认证", "密钥认证"])
+        auth_combo.setCurrentIndex(1 if existing and existing.get("key_path") else 0)
+
+        pw_edit = QLineEdit()
+        pw_edit.setEchoMode(QLineEdit.Password)
+        key_edit = QLineEdit()
+        key_btn = QPushButton("浏览...")
+        key_layout = QHBoxLayout()
+        key_layout.addWidget(key_edit)
+        key_layout.addWidget(key_btn)
+
+        if existing:
+            if existing.get("password"):
+                pw_edit.setText(existing["password"])
+            if existing.get("key_path"):
+                key_edit.setText(existing["key_path"])
+
+        def on_auth_change(idx):
+            pw_edit.setVisible(idx == 0)
+            key_edit.setVisible(idx == 1)
+            key_btn.setVisible(idx == 1)
+        auth_combo.currentIndexChanged.connect(on_auth_change)
+        on_auth_change(auth_combo.currentIndex())
+
+        def browse_key():
+            path, _ = QFileDialog.getOpenFileName(dlg, "选择 SSH 私钥", str(Path.home()))
+            if path:
+                key_edit.setText(path)
+        key_btn.clicked.connect(browse_key)
+
+        layout.addRow("名称:", name_edit)
+        layout.addRow("主机:", host_edit)
+        layout.addRow("端口:", port_edit)
+        layout.addRow("用户:", user_edit)
+        layout.addRow("认证方式:", auth_combo)
+        layout.addRow("密码:", pw_edit)
+        layout.addRow("密钥文件:", key_layout)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addRow(buttons)
+
+        if dlg.exec():
+            name, host = name_edit.text().strip(), host_edit.text().strip()
+            if not name or not host:
+                QMessageBox.warning(self, "错误", "名称和主机不能为空")
+                return
+            server = {
+                "name": name, "host": host, "port": port_edit.value(),
+                "user": user_edit.text().strip(),
+            }
+            if auth_combo.currentIndex() == 0:
+                server["auth_type"] = "password"
+                server["password"] = pw_edit.text()
+            else:
+                server["auth_type"] = "key"
+                server["key_path"] = key_edit.text().strip()
+            add_server(server)
+            self._load_servers()
+
+    def _save_api_key(self):
+        key = self.api_input.text().strip()
+        set_deepseek_key(key)
+        QMessageBox.information(self, "提示", "API Key 已保存")
+
+    def close_ssh(self):
+        if self._ssh:
+            try:
+                self._ssh.close()
+            except Exception:
+                pass
+            self._ssh = None
+
+
+# ── 页面 2: 显卡检测 ──────────────────────────────────
+class GpuPage(QWidget):
+    def __init__(self, bridge: SignalBridge, get_ssh_fn):
+        super().__init__()
+        self.bridge = bridge
+        self.get_ssh = get_ssh_fn
+        self._gpu_info: dict | None = None
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        title = QLabel("🎮 显卡检测")
+        title.setStyleSheet(f"font-size: 18px; font-weight: bold; color: {DEEP_BLUE};")
+        layout.addWidget(title)
+        layout.addWidget(QLabel("检测远程服务器上的 NVIDIA 显卡信息"))
+
+        self.btn_detect = QPushButton("🔍 开始检测")
+        self.btn_detect.setMinimumHeight(36)
+        self.btn_detect.setStyleSheet(
+            f"QPushButton {{ background-color: {BRIGHT_BLUE}; color: white; font-weight: bold; "
+            f"border-radius: 6px; padding: 8px 24px; font-size: 14px; }}"
+            f"QPushButton:hover {{ background-color: {DEEP_BLUE}; }}"
+        )
+        layout.addWidget(self.btn_detect)
+
+        self.info_label = QLabel("点击「开始检测」扫描服务器显卡信息")
+        self.info_label.setStyleSheet(f"color: {DARK_TEXT}; font-size: 13px; padding: 8px; background: {LIGHT_GRAY}; border-radius: 6px;")
+        self.info_label.setWordWrap(True)
+        layout.addWidget(self.info_label)
+        layout.addStretch()
+
+        self.btn_detect.clicked.connect(self._detect)
+
+    def _detect(self):
+        ssh = self.get_ssh()
+        if not ssh:
+            QMessageBox.warning(self, "提示", "请先在「服务器」页面测试连接")
+            return
+        self.info_label.setText("🔄 检测中...")
+        self.btn_detect.setEnabled(False)
+
+        def task():
+            result = detect_gpu(ssh)
+            self.bridge.gpu_signal.emit(result)
+            self.btn_detect.setEnabled(True)
+        threading.Thread(target=task, daemon=True).start()
+
+    def on_result(self, result):
+        if isinstance(result, str):
+            self.info_label.setText(f"❌ {result}")
+            self.info_label.setStyleSheet(f"color: {RED_ERR}; font-size: 13px; padding: 8px; background: {LIGHT_GRAY}; border-radius: 6px;")
+            self._gpu_info = None
+        else:
+            text = (
+                f"✅ 型号: {result['model']}\n"
+                f"驱动: {'已安装: ' + result['driver_version'] if result['driver_installed'] else '未安装'}\n"
+                f"CUDA: {result.get('cuda_version', 'N/A')}\n"
+                f"架构: {result.get('arch', 'x86_64')}"
+            )
+            self.info_label.setText(text)
+            self.info_label.setStyleSheet(f"color: {DARK_TEXT}; font-size: 13px; padding: 8px; background: {LIGHT_GRAY}; border-radius: 6px;")
+            self._gpu_info = result
+
+    def get_gpu_info(self):
+        return self._gpu_info
+
+
+# ── 页面 3: 驱动选择 ──────────────────────────────────
+class DriverPage(QWidget):
+    def __init__(self, get_gpu_fn):
+        super().__init__()
+        self.get_gpu = get_gpu_fn
+        self._selected_version: str | None = None
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        title = QLabel("💿 驱动选择")
+        title.setStyleSheet(f"font-size: 18px; font-weight: bold; color: {DEEP_BLUE};")
+        layout.addWidget(title)
+        layout.addWidget(QLabel("选择要安装的 NVIDIA 驱动版本"))
+
+        self.list_widget = QListWidget()
+        for d in RECOMMENDED_DRIVERS:
+            item = QListWidgetItem(f"{d.version}  {'★ 推荐' if d.is_recommended else ''}")
+            item.setData(Qt.UserRole, d.version)
+            if d.is_recommended:
+                item.setForeground(QColor(DEEP_BLUE))
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+            self.list_widget.addItem(item)
+        layout.addWidget(self.list_widget)
+
+        manual_layout = QHBoxLayout()
+        manual_layout.addWidget(QLabel("或手动输入版本号:"))
+        self.manual_input = QLineEdit()
+        self.manual_input.setPlaceholderText("例如 550.144.03")
+        manual_layout.addWidget(self.manual_input)
+        layout.addLayout(manual_layout)
+
+        self.selected_label = QLabel("未选择驱动")
+        self.selected_label.setStyleSheet(f"color: {DARK_TEXT}; font-size: 13px;")
+        layout.addWidget(self.selected_label)
+        layout.addStretch()
+
+        self.list_widget.currentItemChanged.connect(self._on_select)
+        self.manual_input.textChanged.connect(self._on_manual)
+
+    def _on_select(self, current, _):
+        if current:
+            v = current.data(Qt.UserRole)
+            self._selected_version = v
+            self.selected_label.setText(f"已选择: {v}")
+
+    def _on_manual(self, text):
+        if text.strip():
+            self._selected_version = text.strip()
+            self.selected_label.setText(f"已选择: {text.strip()}")
+
+    def get_selected(self) -> str | None:
+        return self._selected_version
+
+    def auto_select_for_gpu(self):
+        gpu = self.get_gpu()
+        if gpu and isinstance(gpu, dict):
+            recommended = get_recommended_for_gpu(gpu.get("model", ""))
+            for i in range(self.list_widget.count()):
+                item = self.list_widget.item(i)
+                if item.data(Qt.UserRole) == recommended.version:
+                    self.list_widget.setCurrentItem(item)
+                    self._selected_version = recommended.version
+                    self.selected_label.setText(f"已选择: {recommended.version} (推荐)")
+                    return
+            # 手动兜底
+            self.manual_input.setText(recommended.version)
+            self._selected_version = recommended.version
+            self.selected_label.setText(f"已选择: {recommended.version} (推荐)")
+
+
+# ── 页面 4: 环境检查 ──────────────────────────────────
+class EnvCheckPage(QWidget):
+    def __init__(self, bridge: SignalBridge, get_ssh_fn):
+        super().__init__()
+        self.bridge = bridge
+        self.get_ssh = get_ssh_fn
+        self._env_results: dict = {}
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        title = QLabel("🔍 环境检查")
+        title.setStyleSheet(f"font-size: 18px; font-weight: bold; color: {DEEP_BLUE};")
+        layout.addWidget(title)
+        layout.addWidget(QLabel("检查远程服务器上的安装环境"))
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["检查项", "状态", "详情"])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.setStyleSheet(f"QTableWidget {{ border: 1px solid {LIGHT_GRAY}; }} QHeaderView::section {{ background-color: {DEEP_BLUE}; color: white; padding: 6px; }}")
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        layout.addWidget(self.table)
+
+        btn_row = QHBoxLayout()
+        self.btn_check = QPushButton("🔍 执行检查")
+        self.btn_check.setStyleSheet(f"QPushButton {{ background-color: {BRIGHT_BLUE}; color: white; border-radius: 4px; padding: 8px 20px; font-weight: bold; }}")
+        self.btn_fix = QPushButton("🔧 一键修复")
+        self.btn_fix.setStyleSheet(f"QPushButton {{ background-color: {GOLD}; color: {DARK_TEXT}; border-radius: 4px; padding: 8px 20px; font-weight: bold; }}")
+        self.btn_fix.setEnabled(False)
+        btn_row.addWidget(self.btn_check)
+        btn_row.addWidget(self.btn_fix)
         btn_row.addStretch()
         layout.addLayout(btn_row)
 
-        layout.addSpacing(10)
-
-        # API Key 配置
-        key_row = QHBoxLayout()
-        self.btn_api = QPushButton("🔑 配置 API Key")
-        self.btn_api.clicked.connect(self._configure_api)
-        self.label_api_status = QLabel("未配置")
-        self.label_api_status.setStyleSheet(f"color: {ERROR_RED};")
-        key_row.addWidget(self.btn_api)
-        key_row.addWidget(self.label_api_status)
-        key_row.addStretch()
-        layout.addLayout(key_row)
-
-        layout.addSpacing(15)
-
-        # 连接测试区域
-        test_group = QGroupBox("连接测试")
-        test_layout = QVBoxLayout(test_group)
-        self.btn_test = QPushButton("🔌 测试连接")
-        self.btn_test.setMinimumHeight(36)
-        self.btn_test.clicked.connect(self._test_connection)
-        test_layout.addWidget(self.btn_test)
-
-        self.label_status = QLabel("")
-        self.label_status.setAlignment(Qt.AlignCenter)
-        self.label_status.setMinimumHeight(30)
-        font = QFont()
-        font.setPointSize(14)
-        self.label_status.setFont(font)
-        test_layout.addWidget(self.label_status)
-
-        layout.addWidget(test_group)
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet(f"font-size: 13px;")
+        layout.addWidget(self.status_label)
         layout.addStretch()
 
-    def _refresh_servers(self):
-        self.combo_server.clear()
-        self.main.cfg = load_config()
-        for s in self.main.cfg.servers:
-            label = f"{s.name} ({s.user}@{s.host}:{s.port})"
-            self.combo_server.addItem(label, s)
-        self.btn_edit.setEnabled(self.combo_server.count() > 0)
-        self.btn_delete.setEnabled(self.combo_server.count() > 0)
-        self.btn_test.setEnabled(self.combo_server.count() > 0)
-
-        # API Key 状态
-        if self.main.cfg.api_key:
-            key = self.main.cfg.api_key
-            self.label_api_status.setText(f"已配置 ({key[:8]}...{key[-4:]})")
-            self.label_api_status.setStyleSheet(f"color: {SUCCESS_GREEN};")
-        else:
-            self.label_api_status.setText("未配置")
-            self.label_api_status.setStyleSheet(f"color: {ERROR_RED};")
-
-    def _add_server(self):
-        dlg = ServerDialog(self)
-        if dlg.exec_():
-            self.main.cfg.servers.append(dlg.server)
-            save_config(self.main.cfg)
-            self._refresh_servers()
-            # 选中刚添加的
-            idx = self.combo_server.count() - 1
-            self.combo_server.setCurrentIndex(idx)
-
-    def _edit_server(self):
-        idx = self.combo_server.currentIndex()
-        if idx < 0:
-            return
-        server = self.main.cfg.servers[idx]
-        dlg = ServerDialog(self, server)
-        if dlg.exec_():
-            self.main.cfg.servers[idx] = dlg.server
-            save_config(self.main.cfg)
-            self._refresh_servers()
-            self.combo_server.setCurrentIndex(idx)
-
-    def _delete_server(self):
-        idx = self.combo_server.currentIndex()
-        if idx < 0:
-            return
-        server = self.main.cfg.servers[idx]
-        sure = QMessageBox.question(
-            self, "确认删除", f"确定删除服务器「{server.name}」吗？",
-            QMessageBox.Yes | QMessageBox.No
-        )
-        if sure == QMessageBox.Yes:
-            self.main.cfg.servers.pop(idx)
-            save_config(self.main.cfg)
-            self._refresh_servers()
-
-    def _configure_api(self):
-        key, ok = QInputDialog.getText(
-            self, "配置 API Key",
-            "输入 DeepSeek API Key (留空清空):",
-            text=self.main.cfg.api_key if self.main.cfg.api_key else ""
-        )
-        if ok:
-            self.main.cfg.api_key = key.strip()
-            save_config(self.main.cfg)
-            self._refresh_servers()
-
-    def _test_connection(self):
-        idx = self.combo_server.currentIndex()
-        if idx < 0:
-            return
-        server = self.main.cfg.servers[idx]
-        self.btn_test.setEnabled(False)
-        self.btn_test.setText("连接中...")
-        self.label_status.setText("🔄 正在连接...")
-        self.label_status.setStyleSheet(f"color: {BRIGHT_BLUE};")
-
-        def _do_connect():
-            ssh = SSHClient(server.host, server.port, server.user, server.key_path)
-            err = ssh.connect()
-            if err:
-                # 尝试密码认证
-                return {"ok": False, "ssh": ssh, "error": err}
-            return {"ok": True, "ssh": ssh, "error": ""}
-
-        def _on_connect(result):
-            self.btn_test.setEnabled(True)
-            self.btn_test.setText("🔌 测试连接")
-            if result is None:
-                self.label_status.setText("❌ 连接失败")
-                self.label_status.setStyleSheet(f"color: {ERROR_RED};")
-                return
-            if result["ok"]:
-                self.label_status.setText("✅ 连接成功")
-                self.label_status.setStyleSheet(f"color: {SUCCESS_GREEN};")
-                QMessageBox.information(self, "连接成功",
-                    f"已成功连接到 {server.name}")
-                result["ssh"].close()
-            else:
-                err = result["error"]
-                # 检查是否需要密码
-                if "密码" in err:
-                    # 弹出密码对话框
-                    self._retry_with_password(server)
-                else:
-                    self.label_status.setText(f"❌ {err}")
-                    self.label_status.setStyleSheet(f"color: {ERROR_RED};")
-                    QMessageBox.warning(self, "连接失败", err)
-
-        run_in_thread(_do_connect, _on_connect)
-
-    def _retry_with_password(self, server):
-        """密码认证重试"""
-        password, ok = QInputDialog.getText(
-            self, "SSH 密码认证",
-            f"{server.user}@{server.host} 需要密码:",
-            QLineEdit.Password
-        )
-        if not ok or not password:
-            return
-
-        self.btn_test.setEnabled(False)
-        self.btn_test.setText("连接中...")
-        self.label_status.setText("🔄 密码认证中...")
-        self.label_status.setStyleSheet(f"color: {BRIGHT_BLUE};")
-
-        def _do_auth():
-            import paramiko
-            client = paramiko.SSHClient()
-            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            client.connect(server.host, port=server.port,
-                           username=server.user, password=password,
-                           timeout=10, banner_timeout=30)
-            ssh = SSHClient(server.host, server.port, server.user, server.key_path)
-            ssh.client = client
-            return {"ok": True, "ssh": ssh}
-
-        def _on_auth(result):
-            self.btn_test.setEnabled(True)
-            self.btn_test.setText("🔌 测试连接")
-            if result is None:
-                self.label_status.setText("❌ 密码认证失败")
-                self.label_status.setStyleSheet(f"color: {ERROR_RED};")
-                return
-            if result.get("ok"):
-                self.label_status.setText("✅ 连接成功 (密码认证)")
-                self.label_status.setStyleSheet(f"color: {SUCCESS_GREEN};")
-                QMessageBox.information(self, "连接成功",
-                    f"已通过密码认证连接到 {server.name}")
-                result["ssh"].close()
-
-        run_in_thread(_do_auth, _on_auth)
-
-    def get_selected_server(self) -> Optional[Server]:
-        idx = self.combo_server.currentIndex()
-        if idx >= 0 and idx < len(self.main.cfg.servers):
-            return self.main.cfg.servers[idx]
-        return None
-
-
-# ═══════════════════════════════════════════════════════════
-# 页面 2: 显卡检测
-# ═══════════════════════════════════════════════════════════
-class GpuPage(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.main = parent
-        self._build_ui()
-
-    def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(30, 10, 30, 10)
-
-        title = QLabel("显卡检测")
-        title.setObjectName("pageTitle")
-        layout.addWidget(title)
-
-        layout.addWidget(QLabel("检测远程服务器的显卡型号和驱动状态:"))
-
-        self.btn_detect = QPushButton("🔍 检测显卡")
-        self.btn_detect.setMinimumHeight(36)
-        self.btn_detect.clicked.connect(self._detect)
-        layout.addWidget(self.btn_detect)
-
-        self.label_model = QLabel("")
-        self.label_model.setWordWrap(True)
-        self.label_model.setMinimumHeight(80)
-        self.label_model.setAlignment(Qt.AlignCenter)
-        font = QFont()
-        font.setPointSize(13)
-        self.label_model.setFont(font)
-        layout.addWidget(self.label_model)
-
-        # 状态卡片
-        self.card_driver = QLabel("")
-        self.card_driver.setMinimumHeight(30)
-        self.card_driver.setAlignment(Qt.AlignCenter)
-        self.card_driver.setStyleSheet(
-            f"background: white; border: 1px solid #DDD; border-radius: 6px; padding: 12px;")
-        layout.addWidget(self.card_driver)
-
-        self.card_cuda = QLabel("")
-        self.card_cuda.setMinimumHeight(30)
-        self.card_cuda.setAlignment(Qt.AlignCenter)
-        self.card_cuda.setStyleSheet(
-            f"background: white; border: 1px solid #DDD; border-radius: 6px; padding: 12px;")
-        layout.addWidget(self.card_cuda)
-
-        layout.addStretch()
-
-    def _detect(self):
-        ssh = self.main.ssh
-        if not ssh:
-            QMessageBox.warning(self, "提示", "请先在「服务器选择」页连接服务器")
-            return
-
-        self.btn_detect.setEnabled(False)
-        self.btn_detect.setText("检测中...")
-        self.label_model.setText("🔄 正在检测显卡...")
-
-        def _do_detect():
-            return detect_gpu(ssh)
-
-        def _on_detect(result):
-            self.btn_detect.setEnabled(True)
-            self.btn_detect.setText("🔍 检测显卡")
-            if result is None:
-                self.label_model.setText("❌ 检测失败")
-                return
-
-            self.main.gpu_info = result
-            model = result.get("model", "未知")
-            has_driver = result.get("has_driver", False)
-            driver_ver = result.get("driver_version", "")
-            cuda_ver = result.get("cuda_version", "")
-
-            self.label_model.setText(f"🖥️ {model}")
-
-            if has_driver:
-                self.card_driver.setText(f"✅ 驱动已安装: {driver_ver}")
-                self.card_driver.setStyleSheet(
-                    f"background: #E8F5E9; border: 1px solid #A5D6A7; "
-                    f"border-radius: 6px; padding: 12px; color: {SUCCESS_GREEN};")
-            else:
-                self.card_driver.setText("❌ 未安装驱动")
-                self.card_driver.setStyleSheet(
-                    f"background: #FFEBEE; border: 1px solid #EF9A9A; "
-                    f"border-radius: 6px; padding: 12px; color: {ERROR_RED};")
-
-            if cuda_ver:
-                self.card_cuda.setText(f"✅ CUDA: {cuda_ver}")
-                self.card_cuda.setStyleSheet(
-                    f"background: #E8F5E9; border: 1px solid #A5D6A7; "
-                    f"border-radius: 6px; padding: 12px; color: {SUCCESS_GREEN};")
-            else:
-                self.card_cuda.setText("CUDA: 未安装")
-                self.card_cuda.setStyleSheet(
-                    f"background: white; border: 1px solid #DDD; "
-                    f"border-radius: 6px; padding: 12px;")
-
-        run_in_thread(_do_detect, _on_detect)
-
-
-# ═══════════════════════════════════════════════════════════
-# 页面 3: 驱动选择
-# ═══════════════════════════════════════════════════════════
-class DriverPage(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.main = parent
-        self._build_ui()
-
-    def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(30, 10, 30, 10)
-
-        title = QLabel("选择驱动版本")
-        title.setObjectName("pageTitle")
-        layout.addWidget(title)
-
-        layout.addWidget(QLabel("选择要安装的 NVIDIA 驱动版本:"))
-
-        self.list_drivers = QListWidget()
-        self.list_drivers.setMinimumHeight(150)
-        layout.addWidget(self.list_drivers)
-
-        manual_row = QHBoxLayout()
-        manual_row.addWidget(QLabel("或手动输入版本号:"))
-        self.edit_version = QLineEdit()
-        self.edit_version.setPlaceholderText("例如 570.133.00")
-        manual_row.addWidget(self.edit_version)
-        self.btn_manual = QPushButton("使用此版本")
-        self.btn_manual.clicked.connect(self._use_manual)
-        self.btn_manual.setMaximumWidth(120)
-        manual_row.addWidget(self.btn_manual)
-        layout.addLayout(manual_row)
-
-        layout.addStretch()
-
-    def refresh(self):
-        """进入本页时自动刷新驱动列表"""
-        if not self.main.gpu_info:
-            return
-        model = self.main.gpu_info.get("model", "")
-        if not model:
-            return
-
-        drivers = recommend_drivers(model)
-        self.list_drivers.clear()
-        for d in drivers:
-            labels = {"stable": "⭐ 推荐 - 最新稳定版",
-                      "lts": "LTS 分支", "legacy": "旧版"}
-            label = labels.get(d.get("branch", ""), d.get("branch", ""))
-            if d.get("notes"):
-                label += f" - {d['notes']}"
-            text = f"{d['version']}  ({label})"
-            item = QListWidgetItem(text)
-            item.setData(Qt.UserRole, d)
-            self.list_drivers.addItem(item)
-
-        if self.list_drivers.count() > 0:
-            self.list_drivers.setCurrentRow(0)
-
-    def get_selected_driver(self) -> dict:
-        """获取选中的驱动信息"""
-        item = self.list_drivers.currentItem()
-        if item:
-            return item.data(Qt.UserRole)
-        ver = self.edit_version.text().strip()
-        if ver:
-            return {"version": ver, "url": get_driver_url(ver)}
-        return None
-
-    def _use_manual(self):
-        ver = self.edit_version.text().strip()
-        if ver:
-            QMessageBox.information(self, "已选择",
-                f"将安装驱动版本: {ver}")
-
-
-# ═══════════════════════════════════════════════════════════
-# 页面 4: 环境检查
-# ═══════════════════════════════════════════════════════════
-class EnvPage(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.main = parent
-        self.env_results = []
-        self._build_ui()
-
-    def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(30, 10, 30, 10)
-
-        title = QLabel("环境检查")
-        title.setObjectName("pageTitle")
-        layout.addWidget(title)
-
-        layout.addWidget(QLabel("检查目标服务器的系统环境:"))
-
-        self.btn_check = QPushButton("🔍 开始检查")
-        self.btn_check.setMinimumHeight(36)
-        self.btn_check.clicked.connect(self._check)
-        layout.addWidget(self.btn_check)
-
-        self.table_env = QTableWidget(0, 2)
-        self.table_env.setHorizontalHeaderLabels(["状态", "检查项"])
-        self.table_env.horizontalHeader().setStretchLastSection(True)
-        self.table_env.setColumnWidth(0, 80)
-        self.table_env.verticalHeader().setVisible(False)
-        self.table_env.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        layout.addWidget(self.table_env)
-
-        self.btn_fix = QPushButton("🛠️ 一键修复")
-        self.btn_fix.setMinimumHeight(36)
-        self.btn_fix.setEnabled(False)
+        self.btn_check.clicked.connect(self._run_check)
         self.btn_fix.clicked.connect(self._fix_all)
-        layout.addWidget(self.btn_fix)
 
-        layout.addStretch()
-
-    def _check(self):
-        ssh = self.main.ssh
+    def _run_check(self):
+        ssh = self.get_ssh()
         if not ssh:
-            QMessageBox.warning(self, "提示", "请先连接服务器")
+            QMessageBox.warning(self, "提示", "请先在「服务器」页面测试连接")
             return
-
+        self.status_label.setText("🔄 检查中...")
         self.btn_check.setEnabled(False)
-        self.btn_check.setText("检查中...")
 
-        def _do_check():
-            return check_env(ssh)
+        def task():
+            checker = EnvChecker(ssh)
+            checker.check_all()
+            self._env_results = checker.results
+            self.bridge.env_signal.emit(checker.results)
 
-        def _on_check(result):
-            self.btn_check.setEnabled(True)
-            self.btn_check.setText("🔍 开始检查")
-            if result is None:
-                return
-            self.env_results = result
-            self._populate_table(result)
-            has_fail = any(r["status"] == "fail" for r in result)
-            self.btn_fix.setEnabled(has_fail)
+        threading.Thread(target=task, daemon=True).start()
 
-        run_in_thread(_do_check, _on_check)
+    def on_results(self, results: dict):
+        self.btn_check.setEnabled(True)
+        self.table.setRowCount(len(results))
+        self._env_results = results
+        failed = 0
+        for i, (key, (ok, detail)) in enumerate(results.items()):
+            label = CHECK_LABELS.get(key, key)
+            self.table.setItem(i, 0, QTableWidgetItem(label))
+            status_item = QTableWidgetItem("✅ 通过" if ok else "❌ 失败")
+            status_item.setForeground(QColor(GREEN_OK if ok else RED_ERR))
+            self.table.setItem(i, 1, status_item)
+            self.table.setItem(i, 2, QTableWidgetItem(detail))
+            if not ok:
+                failed += 1
 
-    def _populate_table(self, results):
-        self.table_env.setRowCount(len(results))
-        for i, r in enumerate(results):
-            icon = "✅" if r["status"] == "ok" else "❌" if r["status"] == "fail" else "⚠️"
-            item_status = QTableWidgetItem(icon)
-            item_status.setTextAlignment(Qt.AlignCenter)
-            self.table_env.setItem(i, 0, item_status)
-
-            detail = f"{r['name']}: {r['detail']}"
-            item_detail = QTableWidgetItem(detail)
-            self.table_env.setItem(i, 1, item_detail)
-
-            if r["status"] == "fail":
-                item_detail.setBackground(QColor("#FFEBEE"))
+        if failed == 0:
+            self.status_label.setText("✅ 所有环境检查通过")
+            self.status_label.setStyleSheet(f"color: {GREEN_OK}; font-size: 13px;")
+            self.btn_fix.setEnabled(False)
+        else:
+            self.status_label.setText(f"⚠️ {failed} 项检查未通过，可点击「一键修复」")
+            self.status_label.setStyleSheet(f"color: {GOLD}; font-size: 13px;")
+            self.btn_fix.setEnabled(True)
 
     def _fix_all(self):
-        ssh = self.main.ssh
+        ssh = self.get_ssh()
         if not ssh:
             return
-
+        self.status_label.setText("🔄 正在修复...")
         self.btn_fix.setEnabled(False)
-        self.btn_fix.setText("修复中...")
 
-        def _do_fix():
-            for r in self.env_results:
-                if r["status"] == "fail":
-                    fix_env(ssh, r)
-            return check_env(ssh)  # 重新检查
+        from envcheck import EnvChecker
+        checker = EnvChecker(ssh)
 
-        def _on_fix(result):
-            self.btn_fix.setEnabled(True)
-            self.btn_fix.setText("🛠️ 一键修复")
-            if result:
-                self.env_results = result
-                self._populate_table(result)
-                has_fail = any(r["status"] == "fail" for r in result)
-                self.btn_fix.setEnabled(has_fail)
-                if not has_fail:
-                    QMessageBox.information(self, "修复完成",
-                        "所有环境检查项已通过 ✅")
+        def task():
+            failed = [k for k, (ok, _) in self._env_results.items() if not ok]
+            for key in failed:
+                cmd = checker.fix_command(key)
+                if cmd and "BIOS" not in cmd:
+                    ssh.exec(f"sudo {cmd}", timeout=60)
+            # 重新检查
+            checker.check_all()
+            self._env_results = checker.results
+            self.bridge.env_signal.emit(checker.results)
 
-        run_in_thread(_do_fix, _on_fix)
-
-    def is_all_ok(self) -> bool:
-        return all(r["status"] == "ok" for r in self.env_results) \
-            if self.env_results else True
+        threading.Thread(target=task, daemon=True).start()
 
 
-# ═══════════════════════════════════════════════════════════
-# 页面 5: 安装驱动
-# ═══════════════════════════════════════════════════════════
+# ── 页面 5: 安装进度 ──────────────────────────────────
 class InstallPage(QWidget):
-    install_done = pyqtSignal(object)  # 安装完成后发射更新的 gpu_info
+    def __init__(self, bridge: SignalBridge, get_ssh_fn, get_driver_fn, get_gpu_fn):
+        super().__init__()
+        self.bridge = bridge
+        self.get_ssh = get_ssh_fn
+        self.get_driver = get_driver_fn
+        self.get_gpu = get_gpu_fn
+        self._init_ui()
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.main = parent
-        self._build_ui()
-
-    def _build_ui(self):
+    def _init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(30, 10, 30, 10)
-
-        title = QLabel("安装驱动")
-        title.setObjectName("pageTitle")
+        layout.setContentsMargins(24, 20, 24, 20)
+        title = QLabel("⚙️ 驱动安装")
+        title.setStyleSheet(f"font-size: 18px; font-weight: bold; color: {DEEP_BLUE};")
         layout.addWidget(title)
-
-        layout.addWidget(QLabel("正在安装 NVIDIA 驱动，请勿关闭窗口:"))
+        layout.addWidget(QLabel("安装过程实时显示"))
 
         self.progress = QProgressBar()
+        self.progress.setMinimum(0)
+        self.progress.setMaximum(100)
         self.progress.setValue(0)
+        self.progress.setStyleSheet(
+            f"QProgressBar {{ border: 1px solid {BRIGHT_BLUE}; border-radius: 6px; height: 24px; text-align: center; }}"
+            f"QProgressBar::chunk {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {BRIGHT_BLUE}, stop:1 {DEEP_BLUE}); border-radius: 5px; }}"
+        )
         layout.addWidget(self.progress)
 
-        self.log_text = QTextEdit()
-        self.log_text.setReadOnly(True)
-        self.log_text.setMinimumHeight(200)
-        self.log_text.setStyleSheet(
-            "font-family: 'Cascadia Code', 'Fira Code', monospace; "
-            "font-size: 12px; background: #1E1E2E; color: #CDD6F4;")
-        layout.addWidget(self.log_text)
+        self.step_label = QLabel("准备就绪")
+        self.step_label.setStyleSheet(f"color: {DARK_TEXT}; font-size: 13px;")
+        layout.addWidget(self.step_label)
 
-        self.btn_install = QPushButton("🚀 开始安装")
-        self.btn_install.setMinimumHeight(40)
-        self.btn_install.clicked.connect(self._install)
-        layout.addWidget(self.btn_install)
+        self.log_view = QTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setStyleSheet(f"background-color: #1E1E1E; color: #D4D4D4; font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; border-radius: 6px; padding: 8px;")
+        layout.addWidget(self.log_view)
 
-        layout.addStretch()
+        btn_row = QHBoxLayout()
+        self.btn_install = QPushButton("▶ 开始安装")
+        self.btn_install.setStyleSheet(f"QPushButton {{ background-color: {DEEP_BLUE}; color: white; font-weight: bold; border-radius: 6px; padding: 10px 30px; font-size: 14px; }} QPushButton:hover {{ background-color: {BRIGHT_BLUE}; }}")
+        btn_row.addWidget(self.btn_install)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
 
-    def _log(self, msg):
-        self.log_text.append(msg)
-        # 滚动到底部
-        cursor = self.log_text.textCursor()
-        cursor.movePosition(QTextCursor.End)
-        self.log_text.setTextCursor(cursor)
+        self.bridge.log_signal.connect(self.log_view.append)
+        self.bridge.progress_signal.connect(self._update_progress)
+        self.btn_install.clicked.connect(self._start_install)
 
-    def _install(self):
-        ssh = self.main.ssh
+    def _update_progress(self, value, total, label):
+        if total > 0:
+            self.progress.setMaximum(total)
+            self.progress.setValue(value)
+        self.step_label.setText(label)
+
+    def _start_install(self):
+        ssh = self.get_ssh()
+        driver_v = self.get_driver()
+        gpu = self.get_gpu()
         if not ssh:
-            QMessageBox.warning(self, "提示", "请先连接服务器")
+            QMessageBox.warning(self, "提示", "请先在「服务器」页面连接")
+            return
+        if not driver_v:
+            QMessageBox.warning(self, "提示", "请先在「驱动选择」页面选择版本")
             return
 
-        driver = self.main.selected_driver
-        if not driver:
-            QMessageBox.warning(self, "提示", "请先在「驱动选择」页选择驱动")
-            return
-
-        ver = driver["version"]
-        url = driver["url"]
-
-        self.btn_install.setEnabled(False)
-        self.btn_install.setText("安装中...")
+        self.log_view.clear()
         self.progress.setValue(0)
-        self.log_text.clear()
+        self.btn_install.setEnabled(False)
+        download_url = get_download_url(driver_v)
+        installer = Installer(ssh, download_url, driver_v)
 
-        def _do_install(progress_signal, log_signal):
-            def log_msg(msg):
-                log_signal.emit(msg)
-
-            # 阶段 1: 下载 (0-20%)
-            progress_signal.emit(5, "正在下载驱动...")
-            log_msg(f"📥 下载驱动 {ver}...")
-            err = download_driver(ssh, ver, url)
-            if err:
-                log_msg(f"❌ 下载失败: {err}")
-                raise Exception(err)
-            log_msg("✅ 下载完成")
-            progress_signal.emit(20, "下载完成")
-
-            # 阶段 2: 禁用 nouveau (20-30%)
-            progress_signal.emit(20, "正在禁用 nouveau...")
-            log_msg("🔧 禁用 nouveau...")
-            disable_nouveau(ssh)
-            log_msg("✅ nouveau 已禁用")
-            progress_signal.emit(30, "nouveau 已禁用")
-
-            # 阶段 3: 安装 (30-80%)
-            progress_signal.emit(30, "正在安装驱动...")
-            log_msg("🔨 运行安装程序...")
-            known_err, out, err_out = run_installer(ssh, ver)
-
-            if known_err:
-                log_msg(f"⚠️ 已知错误: {known_err['title']}")
-                # 尝试本地修复
-                fix_cmd = known_err.get("fix", "")
-                if fix_cmd:
-                    log_msg(f"🛠️ 尝试自动修复: {fix_cmd}")
-                    ssh.exec(fix_cmd, timeout=120)
-                    log_msg("↩️ 重试安装...")
-                    known_err2, _, _ = run_installer(ssh, ver)
-                    if known_err2:
-                        log_msg(f"❌ 重试仍失败: {known_err2['title']}")
-                        diag = diagnose("",
-                            known_err2['title'], "")
-                        if prompt_result(diag, log_msg):
-                            if diag.get("fix"):
-                                ssh.exec(diag["fix"], timeout=120)
-
-            # 收集所有输出
-            combined = out + "\n" + err_out
-            if combined.strip():
-                log_msg(f"📋 安装日志:\n{combined[:2000]}")
-                # AI 诊断
-                if self.main.cfg.api_key:
-                    log_msg("🤖 AI 诊断中...")
-                    diag = diagnose(self.main.cfg.api_key, combined,
-                                    self.main.gpu_info.get("model", ""))
-                    if prompt_result(diag, log_msg):
-                        if diag.get("fix"):
-                            ssh.exec(diag["fix"], timeout=120)
-
-            progress_signal.emit(80, "安装完成，验证中...")
-            log_msg("✅ 安装流程完成，验证中...")
-
-            # 阶段 4: 验证 (80-100%)
-            updated = verify_installation(ssh)
-            progress_signal.emit(100, "验证完成")
-            return updated
-
-        def prompt_result(diag, log_fn):
-            """在桌面环境中显示修复建议并等待用户确认"""
-            if diag and diag.get("fix"):
-                msg = diag.get("reason", "") or diag.get("title", "")
-                fix = diag.get("fix", "")
-                log_fn(f"💡 建议修复: {msg}")
-                log_fn(f"  命令: {fix}")
-                # 自动执行修复（不打断流程）
-                return True
-            return False
-
-        def _on_progress(percent, msg):
-            self.progress.setValue(percent)
-
-        def _on_log(msg):
-            self._log(msg)
-
-        def _on_done(result):
-            self.btn_install.setEnabled(True)
-            self.btn_install.setText("🚀 开始安装")
-            self.progress.setValue(100)
-            if result and result.get("has_driver"):
-                self.main.gpu_info = result
-                self._log("🎉 驱动安装成功！")
-                QMessageBox.information(self, "安装成功",
-                    f"驱动 {result.get('driver_version', ver)} 安装成功！")
+        def task():
+            self.bridge.log_signal.emit(f"🚀 开始安装驱动 {driver_v}...")
+            success, logs = installer.full_install()
+            for line in logs:
+                self.bridge.log_signal.emit(line)
+            if success:
+                self.bridge.log_signal.emit("✅ 安装完成！")
+                self.bridge.done_signal.emit(True, f"驱动 {driver_v} 安装成功")
             else:
-                self._log("⚠️ 安装可能不完整，请检查日志")
+                self.bridge.log_signal.emit("❌ 安装失败！")
+                # 尝试 AI 诊断
+                self.bridge.log_signal.emit("🤖 正在进行 AI 诊断...")
+                try:
+                    diag = diagnose_with_deepseek("\n".join(logs), f"驱动版本: {driver_v}")
+                    self.bridge.log_signal.emit(f"\n--- AI 诊断 ---\n{diag}")
+                except Exception:
+                    pass
+                self.bridge.done_signal.emit(False, "安装失败")
+            self.btn_install.setEnabled(True)
+            self.progress.setMaximum(1)
+            self.progress.setValue(1)
 
-        def _do_with_signals():
-            return _do_install(_on_progress, _on_log)
-
-        run_in_thread(_do_with_signals, _on_done)
+        threading.Thread(target=task, daemon=True).start()
 
 
-# ═══════════════════════════════════════════════════════════
-# 页面 6: CUDA/cuDNN
-# ═══════════════════════════════════════════════════════════
+# ── 页面 6: CUDA / cuDNN ────────────────────────────
 class CudaPage(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.main = parent
-        self._build_ui()
+    def __init__(self, bridge: SignalBridge, get_ssh_fn):
+        super().__init__()
+        self.bridge = bridge
+        self.get_ssh = get_ssh_fn
+        self._init_ui()
 
-    def _build_ui(self):
+    def _init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(30, 10, 30, 10)
-
-        title = QLabel("CUDA / cuDNN 安装")
-        title.setObjectName("pageTitle")
+        layout.setContentsMargins(24, 20, 24, 20)
+        title = QLabel("🧩 CUDA & cuDNN 安装")
+        title.setStyleSheet(f"font-size: 18px; font-weight: bold; color: {DEEP_BLUE};")
         layout.addWidget(title)
 
-        self.chk_cuda = QCheckBox("安装 CUDA Toolkit")
-        self.chk_cuda.setStyleSheet("font-size: 14px; padding: 8px 0;")
-        layout.addWidget(self.chk_cuda)
+        # CUDA
+        cuda_group = QGroupBox("CUDA Toolkit")
+        cuda_group.setStyleSheet(f"QGroupBox {{ font-weight: bold; border: 1px solid {BRIGHT_BLUE}; border-radius: 6px; margin-top: 10px; padding-top: 16px; }} QGroupBox::title {{ color: {DEEP_BLUE}; }}")
+        clayout = QVBoxLayout(cuda_group)
+        self.cb_cuda = QCheckBox("安装 CUDA Toolkit")
+        clayout.addWidget(self.cb_cuda)
+        cuda_ver_row = QHBoxLayout()
+        cuda_ver_row.addWidget(QLabel("版本:"))
+        self.cuda_ver_combo = QComboBox()
+        for v in get_cuda_versions():
+            self.cuda_ver_combo.addItem(v)
+        cuda_ver_row.addWidget(self.cuda_ver_combo)
+        cuda_ver_row.addStretch()
+        clayout.addLayout(cuda_ver_row)
+        layout.addWidget(cuda_group)
 
-        self.chk_cudnn = QCheckBox("安装 cuDNN")
-        self.chk_cudnn.setStyleSheet("font-size: 14px; padding: 8px 0;")
-        layout.addWidget(self.chk_cudnn)
+        # cuDNN
+        cudnn_group = QGroupBox("cuDNN")
+        cudnn_group.setStyleSheet(cuda_group.styleSheet())
+        nlayout = QVBoxLayout(cudnn_group)
+        self.cb_cudnn = QCheckBox("安装 cuDNN")
+        nlayout.addWidget(self.cb_cudnn)
+        cudnn_ver_row = QHBoxLayout()
+        cudnn_ver_row.addWidget(QLabel("版本:"))
+        self.cudnn_ver_combo = QComboBox()
+        for v in get_cudnn_versions():
+            self.cudnn_ver_combo.addItem(v)
+        cudnn_ver_row.addWidget(self.cudnn_ver_combo)
+        cudnn_ver_row.addStretch()
+        nlayout.addLayout(cudnn_ver_row)
+        layout.addWidget(cudnn_group)
 
-        self.btn_install = QPushButton("开始安装")
+        self.btn_install = QPushButton("📦 开始安装")
         self.btn_install.setMinimumHeight(36)
-        self.btn_install.clicked.connect(self._install)
+        self.btn_install.setStyleSheet(
+            f"QPushButton {{ background-color: {DEEP_BLUE}; color: white; font-weight: bold; "
+            f"border-radius: 6px; padding: 8px 24px; font-size: 14px; }}"
+            f"QPushButton:hover {{ background-color: {BRIGHT_BLUE}; }}"
+        )
         layout.addWidget(self.btn_install)
 
-        self.log_text = QTextEdit()
-        self.log_text.setReadOnly(True)
-        self.log_text.setMinimumHeight(200)
-        self.log_text.setStyleSheet(
-            "font-family: 'Cascadia Code', 'Fira Code', monospace; "
-            "font-size: 12px; background: #1E1E2E; color: #CDD6F4;")
-        layout.addWidget(self.log_text)
+        self.log_view = QTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setStyleSheet(f"background-color: #1E1E1E; color: #D4D4D4; font-family: Consolas, monospace; font-size: 12px; border-radius: 6px;")
+        self.log_view.setMaximumHeight(200)
+        layout.addWidget(self.log_view)
 
+        self.bridge.log_signal.connect(self._append_log)
+        self.btn_install.clicked.connect(self._start_install)
         layout.addStretch()
 
-    def _log(self, msg):
-        self.log_text.append(msg)
-        cursor = self.log_text.textCursor()
-        cursor.movePosition(QTextCursor.End)
-        self.log_text.setTextCursor(cursor)
+    def _append_log(self, msg):
+        self.log_view.append(msg)
 
-    def _install(self):
-        ssh = self.main.ssh
+    def _start_install(self):
+        ssh = self.get_ssh()
         if not ssh:
-            QMessageBox.warning(self, "提示", "请先连接服务器")
+            QMessageBox.warning(self, "提示", "请先在「服务器」页面连接")
             return
 
+        self.log_view.clear()
         self.btn_install.setEnabled(False)
-        self.btn_install.setText("安装中...")
-        self.log_text.clear()
 
-        gpu = self.main.gpu_info or {}
+        def task():
+            if self.cb_cuda.isChecked():
+                cuda_ver = self.cuda_ver_combo.currentText()
+                self.bridge.log_signal.emit(f"📦 安装 CUDA Toolkit {cuda_ver}...")
+                success, logs = install_cuda(ssh, cuda_ver)
+                for l in logs:
+                    self.bridge.log_signal.emit(l)
+                if not success:
+                    self.bridge.log_signal.emit("❌ CUDA 安装失败")
 
-        def _do_install():
-            logs = []
-            if self.chk_cuda.isChecked():
-                logs.append("📦 安装 CUDA Toolkit...")
-                cuda_entry = recommend_cuda(gpu.get("driver_version", ""))
-                logs.append(f"  推荐版本: {cuda_entry['version']}")
-                err = install_cuda(ssh, cuda_entry)
-                if err:
-                    logs.append(f"❌ CUDA 安装失败: {err}")
-                else:
-                    logs.append("✅ CUDA 安装成功")
+            if self.cb_cudnn.isChecked():
+                cudnn_ver = self.cudnn_ver_combo.currentText()
+                self.bridge.log_signal.emit(f"📦 安装 cuDNN {cudnn_ver}...")
+                success, logs = install_cudnn(ssh, cudnn_ver)
+                for l in logs:
+                    self.bridge.log_signal.emit(l)
+                if not success:
+                    self.bridge.log_signal.emit("❌ cuDNN 安装失败")
 
-            if self.chk_cudnn.isChecked():
-                cuda_ver = gpu.get("cuda_version", "12")
-                logs.append(f"\n📦 安装 cuDNN (CUDA {cuda_ver})...")
-                cudnn_entry = recommend_cudnn(cuda_ver)
-                logs.append(f"  推荐版本: {cudnn_entry['version']}")
-                err = install_cudnn(ssh, cudnn_entry)
-                if err:
-                    logs.append(f"❌ cuDNN 安装失败: {err}")
-                else:
-                    logs.append("✅ cuDNN 安装成功")
-
-            return "\n".join(logs)
-
-        def _on_done(result):
+            self.bridge.log_signal.emit("✅ CUDA/cuDNN 安装完成")
             self.btn_install.setEnabled(True)
-            self.btn_install.setText("开始安装")
-            if result:
-                self.log_text.setPlainText(result)
-                if "失败" not in result:
-                    QMessageBox.information(self, "安装完成",
-                        "CUDA / cuDNN 安装完成！")
 
-        run_in_thread(_do_install, _on_done)
+        threading.Thread(target=task, daemon=True).start()
 
 
-# ═══════════════════════════════════════════════════════════
-# 页面 7: 完成报告
-# ═══════════════════════════════════════════════════════════
-class SummaryPage(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.main = parent
-        self._build_ui()
+# ── 页面 7: 报告 ──────────────────────────────────
+class ReportPage(QWidget):
+    def __init__(self, get_server_fn, get_gpu_fn, get_driver_fn):
+        super().__init__()
+        self.get_server = get_server_fn
+        self.get_gpu = get_gpu_fn
+        self.get_driver = get_driver_fn
+        self._init_ui()
 
-    def _build_ui(self):
+    def _init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(30, 10, 30, 10)
-
-        title = QLabel("安装报告")
-        title.setObjectName("pageTitle")
+        layout.setContentsMargins(24, 20, 24, 20)
+        title = QLabel("📋 安装报告")
+        title.setStyleSheet(f"font-size: 18px; font-weight: bold; color: {DEEP_BLUE};")
         layout.addWidget(title)
 
-        self.report_text = QLabel("")
-        self.report_text.setWordWrap(True)
-        self.report_text.setMinimumHeight(300)
-        self.report_text.setStyleSheet(
-            "background: white; border: 1px solid #DDD; "
-            "border-radius: 6px; padding: 20px; "
-            "font-size: 14px; line-height: 1.8;")
-        self.report_text.setAlignment(Qt.AlignTop)
+        self.report_text = QTextEdit()
+        self.report_text.setReadOnly(True)
+        self.report_text.setStyleSheet(f"background-color: {LIGHT_GRAY}; border-radius: 6px; padding: 12px; font-size: 13px;")
         layout.addWidget(self.report_text)
 
         btn_row = QHBoxLayout()
         self.btn_save = QPushButton("💾 保存报告")
-        self.btn_save.clicked.connect(self._save_report)
+        self.btn_save.setStyleSheet(f"QPushButton {{ background-color: {GOLD}; color: {DARK_TEXT}; font-weight: bold; border-radius: 6px; padding: 10px 24px; font-size: 14px; }}")
+        self.btn_refresh = QPushButton("🔄 刷新")
+        self.btn_refresh.setStyleSheet(f"QPushButton {{ background-color: {BRIGHT_BLUE}; color: white; border-radius: 6px; padding: 10px 24px; }}")
         btn_row.addWidget(self.btn_save)
-        self.btn_new = QPushButton("🔄 重新开始")
-        self.btn_new.clicked.connect(self._restart)
-        btn_row.addWidget(self.btn_new)
+        btn_row.addWidget(self.btn_refresh)
         btn_row.addStretch()
         layout.addLayout(btn_row)
-
         layout.addStretch()
 
-    def refresh(self):
-        """加载报告内容"""
-        ssh = self.main.ssh
-        gpu = self.main.gpu_info or {}
-        elapsed = time.time() - self.main.start_time
+        self.btn_save.clicked.connect(self._save_report)
+        self.btn_refresh.clicked.connect(self._generate)
 
-        host = ssh.host if ssh else "未连接"
-        model = gpu.get("model", "未检测")
-        driver = gpu.get("driver_version", "未安装")
-        cuda = gpu.get("cuda_version", "未安装")
+    def _generate(self):
+        server = self.get_server()
+        gpu = self.get_gpu()
+        driver = self.get_driver()
 
-        report = (
-            f"📋 安装报告\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"🖥️ 服务器: {host}\n"
-            f"💳 显卡:   {model}\n"
-            f"🔧 驱动:   {driver}\n"
-            f"📐 CUDA:   {cuda}\n"
-            f"⏱️ 耗时:   {int(elapsed // 60)} 分 {int(elapsed % 60)} 秒\n"
-            f"📂 日志:   {get_log_dir()}\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"✅ 安装完成于 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        )
-        self.report_text.setText(report)
+        lines = []
+        lines.append("=" * 50)
+        lines.append("  NVIDIA 驱动安装报告")
+        lines.append("=" * 50)
+        lines.append("")
+
+        lines.append("【服务器信息】")
+        if server:
+            lines.append(f"  名称: {server.get('name', 'N/A')}")
+            lines.append(f"  主机: {server.get('host', 'N/A')}:{server.get('port', 22)}")
+            lines.append(f"  用户: {server.get('user', 'root')}")
+        else:
+            lines.append("  未选择服务器")
+        lines.append("")
+
+        lines.append("【显卡信息】")
+        if gpu and isinstance(gpu, dict):
+            lines.append(f"  型号: {gpu.get('model', 'N/A')}")
+            lines.append(f"  当前驱动: {gpu.get('driver_version', '未安装')}")
+            lines.append(f"  CUDA 版本: {gpu.get('cuda_version', 'N/A')}")
+        else:
+            lines.append("  未检测")
+        lines.append("")
+
+        lines.append("【驱动安装】")
+        lines.append(f"  选择版本: {driver or '未选择'}")
+        lines.append("")
+
+        lines.append(f"  生成时间: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append("=" * 50)
+
+        self.report_text.setText("\n".join(lines))
 
     def _save_report(self):
         path, _ = QFileDialog.getSaveFileName(
-            self, "保存报告",
-            f"nvidia-install-report-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt",
-            "Text Files (*.txt);;All Files (*)"
-        )
+            self, "保存报告", str(Path.home() / "nvidia-install-report.txt"),
+            "文本文件 (*.txt)")
         if path:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(self.report_text.text())
-            QMessageBox.information(self, "已保存", f"报告已保存到:\n{path}")
-
-    def _restart(self):
-        """重新开始整个流程"""
-        if self.main.ssh:
-            self.main.ssh.close()
-            self.main.ssh = None
-        self.main.start_time = time.time()
-        self.main.gpu_info = None
-        self.main.selected_driver = None
-        self.main.stack.setCurrentIndex(0)
+            with open(path, "w") as f:
+                f.write(self.report_text.toPlainText())
+            QMessageBox.information(self, "提示", f"报告已保存到:\n{path}")
 
 
-# ═══════════════════════════════════════════════════════════
-# 主窗口
-# ═══════════════════════════════════════════════════════════
+# ── 主窗口 ──────────────────────────────────────────
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.cfg = load_config()
-        self.ssh: Optional[SSHClient] = None
-        self.gpu_info: Optional[dict] = None
-        self.selected_driver: Optional[dict] = None
-        self.start_time = time.time()
+        self.setWindowTitle("NVIDIA Tools — 驱动安装助手")
+        self.setFixedSize(800, 620)
+        self.setStyleSheet(f"QMainWindow {{ background-color: {WHITE}; }}")
 
-        self.setWindowTitle("NVIDIA 驱动安装助手 v2.0")  # 触发重编
-        self.resize(800, 600)
-        self._center()
-        self.setStyleSheet(APP_STYLE)
+        self.bridge = SignalBridge()
+        self._current_page = 0
+        self._ssh: SSHClient | None = None
+        self._connected = False
 
-        self._build_ui()
-        self._setup_nav()
+        self._init_ui()
+        self._connect_signals()
 
-    def _center(self):
-        screen = QApplication.primaryScreen().geometry()
-        x = (screen.width() - 800) // 2
-        y = (screen.height() - 600) // 2
-        self.move(x, y)
-
-    def _build_ui(self):
+    def _init_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # 顶部标题栏
-        header = QFrame()
-        header.setStyleSheet(f"background: {DEEP_BLUE}; padding: 10px;")
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(20, 8, 20, 8)
+        # 页面提示
+        self.page_title = QLabel(PAGES[0])
+        self.page_title.setStyleSheet(
+            f"background-color: {DEEP_BLUE}; color: white; font-size: 16px; font-weight: bold; "
+            f"padding: 12px 24px;"
+        )
+        main_layout.addWidget(self.page_title)
 
-        title_label = QLabel("NVIDIA 驱动安装助手")
-        title_label.setStyleSheet("color: white; font-size: 16px; font-weight: bold;")
-        header_layout.addWidget(title_label)
-
-        # 步骤指示器
-        self.step_label = QLabel("步骤 1/7")
-        self.step_label.setStyleSheet(
-            f"color: {GOLD}; font-size: 14px; font-weight: bold; padding: 0 10px;")
-        header_layout.addWidget(self.step_label)
-        header_layout.addStretch()
-
-        # 状态指示
-        self.connection_label = QLabel("🔴 未连接")
-        self.connection_label.setStyleSheet("color: white; font-size: 12px;")
-        header_layout.addWidget(self.connection_label)
-
-        main_layout.addWidget(header)
-
-        # 内容区域（QStackedWidget）
+        # Stack
         self.stack = QStackedWidget()
-        self.stack.setStyleSheet(f"background: {BG_LIGHT};")
+        self.stack.setStyleSheet(f"background-color: {WHITE};")
 
-        self.page_servers = ServerPage(self)
-        self.page_gpu = GpuPage(self)
-        self.page_driver = DriverPage(self)
-        self.page_env = EnvPage(self)
-        self.page_install = InstallPage(self)
-        self.page_cuda = CudaPage(self)
-        self.page_summary = SummaryPage(self)
+        self.server_page = ServerPage(self.bridge)
+        self.gpu_page = GpuPage(self.bridge, self._get_ssh)
+        self.driver_page = DriverPage(self.gpu_page.get_gpu_info)
+        self.env_page = EnvCheckPage(self.bridge, self._get_ssh)
+        self.install_page = InstallPage(self.bridge, self._get_ssh,
+                                        self.driver_page.get_selected,
+                                        self.gpu_page.get_gpu_info)
+        self.cuda_page = CudaPage(self.bridge, self._get_ssh)
+        self.report_page = ReportPage(self.server_page.get_server_info,
+                                      self.gpu_page.get_gpu_info,
+                                      self.driver_page.get_selected)
 
-        self.stack.addWidget(self.page_servers)   # 0
-        self.stack.addWidget(self.page_gpu)        # 1
-        self.stack.addWidget(self.page_driver)     # 2
-        self.stack.addWidget(self.page_env)        # 3
-        self.stack.addWidget(self.page_install)    # 4
-        self.stack.addWidget(self.page_cuda)       # 5
-        self.stack.addWidget(self.page_summary)    # 6
+        for page in [self.server_page, self.gpu_page, self.driver_page,
+                     self.env_page, self.install_page, self.cuda_page,
+                     self.report_page]:
+            self.stack.addWidget(page)
 
         main_layout.addWidget(self.stack, 1)
 
-        # 底部导航栏
-        nav_bar = QFrame()
-        nav_bar.setStyleSheet(f"background: white; border-top: 1px solid #DDD;")
-        nav_layout = QHBoxLayout(nav_bar)
-        nav_layout.setContentsMargins(20, 10, 20, 10)
+        # Bottom bar
+        self.bottom_bar = BottomBar()
+        main_layout.addWidget(self.bottom_bar)
 
-        self.btn_prev = QPushButton("← 上一步")
-        self.btn_prev.setObjectName("btnPrev")
-        self.btn_prev.clicked.connect(self._go_prev)
-        self.btn_prev.setEnabled(False)
+        # 按钮事件
+        self.bottom_bar.btn_prev.clicked.connect(self._prev_page)
+        self.bottom_bar.btn_next.clicked.connect(self._next_page)
 
-        nav_layout.addWidget(self.btn_prev)
-        nav_layout.addStretch()
+    def _connect_signals(self):
+        self.bridge.check_signal.connect(self._on_connection_check)
+        self.bridge.gpu_signal.connect(self.gpu_page.on_result)
+        self.bridge.env_signal.connect(self.env_page.on_results)
+        self.bridge.done_signal.connect(self._on_install_done)
 
-        self.btn_next = QPushButton("下一步 →")
-        self.btn_next.setObjectName("btnNext")
-        self.btn_next.clicked.connect(self._go_next)
-        nav_layout.addWidget(self.btn_next)
+        # 显卡检测完成后自动推荐驱动
+        self.bridge.gpu_signal.connect(lambda r: self.driver_page.auto_select_for_gpu())
 
-        main_layout.addWidget(nav_bar)
+    def _get_ssh(self):
+        return self.server_page.get_ssh()
 
-        # 状态栏
-        status_bar = self.statusBar()
-        status_bar.showMessage("就绪")
+    def _on_connection_check(self, ok: bool):
+        self._connected = ok
+        info = self.server_page.get_server_info()
+        name = info.get("name", "") if info else ""
+        self.bottom_bar.set_server(name, ok)
 
-    def _setup_nav(self):
-        """设置页面导航逻辑"""
-        self.PAGE_NAMES = [
-            "服务器选择", "显卡检测", "驱动选择",
-            "环境检查", "安装驱动", "CUDA/cuDNN", "完成报告"
-        ]
-        self._update_nav()
+    def _on_install_done(self, success: bool, msg: str):
+        if success:
+            QMessageBox.information(self, "成功", msg)
+        else:
+            QMessageBox.warning(self, "失败", msg)
 
-    def _update_nav(self):
-        idx = self.stack.currentIndex()
-        self.step_label.setText(f"步骤 {idx + 1}/7 — {self.PAGE_NAMES[idx]}")
-        self.btn_prev.setEnabled(idx > 0)
-        self.btn_next.setText("完成 ✓" if idx == 6 else "下一步 →")
+    def _prev_page(self):
+        if self._current_page > 0:
+            self._current_page -= 1
+            self._update_page()
 
-    def _go_prev(self):
-        idx = self.stack.currentIndex()
-        if idx > 0:
-            self.stack.setCurrentIndex(idx - 1)
-            self._update_nav()
-
-    def _go_next(self):
-        idx = self.stack.currentIndex()
-        if idx == 0:
-            # 服务器选择 → 需要先连接 SSH
-            self._connect_and_advance()
-            return
-        elif idx == 1:
-            # 显卡检测 → 如果没有 GPU 信息，阻止前进
-            if not self.gpu_info:
+    def _next_page(self):
+        if self._current_page == PAGE_COUNT - 1:
+            return  # 最后一页无下一步
+        # 页面检查
+        if self._current_page == 0:
+            if not self._connected:
+                QMessageBox.warning(self, "提示", "请先测试并连接服务器")
+                return
+        if self._current_page == 1:
+            if not self.gpu_page.get_gpu_info():
                 QMessageBox.warning(self, "提示", "请先检测显卡")
                 return
-        elif idx == 2:
-            # 驱动选择 → 保存选中的驱动
-            driver = self.page_driver.get_selected_driver()
-            if not driver:
-                QMessageBox.warning(self, "提示", "请选择一个驱动版本")
-                return
-            self.selected_driver = driver
-        elif idx == 3:
-            # 环境检查 → 非必须，可跳过
-            pass
-        elif idx == 4:
-            # 安装后自动刷新 GPU 信息
-            pass
-        elif idx == 5:
-            # CUDA 后到汇总
-            pass
-        elif idx == 6:
-            # 完成
-            QMessageBox.information(self, "完成",
-                "所有操作已完成！点击「重新开始」可进行下一次安装。")
-            return
-
-        # 导航到下一页
-        if idx + 1 < self.stack.count():
-            # 特殊处理：进入驱动选择页时刷新列表
-            if idx + 1 == 2:
-                self.page_driver.refresh()
-            # 进入汇总页时刷新报告
-            if idx + 1 == 6:
-                self.page_summary.refresh()
-            self.stack.setCurrentIndex(idx + 1)
-            self._update_nav()
-
-    def _connect_and_advance(self):
-        """从服务器选择页连接到选中服务器，然后前进到下一页"""
-        server = self.page_servers.get_selected_server()
-        if not server:
-            QMessageBox.warning(self, "提示", "请先选择服务器")
-            return
-
-        self.btn_next.setEnabled(False)
-        self.btn_next.setText("连接中...")
-
-        self.connection_label.setText("🔄 连接中...")
-        self.connection_label.setStyleSheet("color: #FFC000; font-size: 12px;")
-
-        def _do_connect():
-            ssh = SSHClient(server.host, server.port, server.user, server.key_path)
-            err = ssh.connect()
-            if err:
-                # 尝试密码认证
-                if "密码" in err:
-                    return {"need_password": True, "server": server}
-                return {"ok": False, "error": err}
-            return {"ok": True, "ssh": ssh}
-
-        def _on_connect(result):
-            self.btn_next.setEnabled(True)
-            self.btn_next.setText("下一步 →")
-
-            if result is None:
-                self.connection_label.setText("🔴 连接失败")
-                QMessageBox.critical(self, "连接失败", "无法连接到服务器")
+        if self._current_page == 2:
+            if not self.driver_page.get_selected():
+                QMessageBox.warning(self, "提示", "请选择驱动版本")
                 return
 
-            if result.get("need_password"):
-                self._connect_with_password(server)
-                return
+        self._current_page += 1
+        self._update_page()
 
-            if result.get("ok"):
-                self.ssh = result["ssh"]
-                self.connection_label.setText(f"🟢 {server.name} ({server.host})")
-                self.connection_label.setStyleSheet("color: #27AE60; font-size: 12px;")
-                self.statusBar().showMessage(f"已连接: {server.name}")
+    def _update_page(self):
+        self.stack.setCurrentIndex(self._current_page)
+        self.page_title.setText(PAGES[self._current_page])
+        self.bottom_bar.set_page(self._current_page)
 
-                # 前进到下一页
-                self.stack.setCurrentIndex(1)
-                self._update_nav()
-            else:
-                self.connection_label.setText("🔴 连接失败")
-                QMessageBox.critical(self, "连接失败", result.get("error", ""))
-
-        run_in_thread(_do_connect, _on_connect)
-
-    def _connect_with_password(self, server):
-        """密码认证连接"""
-        password, ok = QInputDialog.getText(
-            self, "SSH 密码",
-            f"{server.user}@{server.host} 需要密码:",
-            QLineEdit.Password
-        )
-        if not ok or not password:
-            self.connection_label.setText("🔴 未连接")
-            return
-
-        self.btn_next.setEnabled(False)
-        self.btn_next.setText("连接中...")
-
-        def _do_auth():
-            import paramiko
-            client = paramiko.SSHClient()
-            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            client.connect(server.host, port=server.port,
-                           username=server.user, password=password,
-                           timeout=10, banner_timeout=30)
-            ssh = SSHClient(server.host, server.port, server.user, server.key_path)
-            ssh.client = client
-            return {"ok": True, "ssh": ssh}
-
-        def _on_auth(result):
-            self.btn_next.setEnabled(True)
-            self.btn_next.setText("下一步 →")
-            if result and result.get("ok"):
-                self.ssh = result["ssh"]
-                self.connection_label.setText(f"🟢 {server.name} ({server.host})")
-                self.connection_label.setStyleSheet("color: #27AE60; font-size: 12px;")
-                self.statusBar().showMessage(f"已连接: {server.name}")
-                self.stack.setCurrentIndex(1)
-                self._update_nav()
-            else:
-                self.connection_label.setText("🔴 认证失败")
-                QMessageBox.critical(self, "认证失败", "密码认证失败")
-
-        run_in_thread(_do_auth, _on_auth)
+        # 进入报告页自动生成
+        if self._current_page == PAGE_COUNT - 1:
+            self.report_page._generate()
 
     def closeEvent(self, event):
-        """关闭时断开 SSH"""
-        if self.ssh:
-            try:
-                self.ssh.close()
-            except Exception:
-                pass
+        self.server_page.close_ssh()
         event.accept()
 
 
-# ═══════════════════════════════════════════════════════════
-# 入口
-# ═══════════════════════════════════════════════════════════
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("NVIDIA 驱动安装助手")
-    app.setOrganizationName("DYC")
-
-    win = MainWindow()
-    win.show()
+    app.setStyle("Fusion")
+    window = MainWindow()
+    window.show()
     sys.exit(app.exec_())
 
 
