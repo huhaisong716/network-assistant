@@ -1,0 +1,30 @@
+name: Build OCR Tool
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'ocr-tool/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r ocr-tool/requirements.txt
+      - name: Build with PyInstaller
+        working-directory: ocr-tool
+        run: |
+          pyinstaller --onefile --windowed --clean --name OCRDataExtractor --collect-all rapidocr_onnxruntime --collect-all cv2 --collect-all numpy --hidden-import=PIL._tkinter_finder main.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OCRDataExtractor
+          path: ocr-tool/dist/OCRDataExtractor.exe

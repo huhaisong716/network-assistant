@@ -1,0 +1,6 @@
+PyMuPDF
+rapidocr-onnxruntime
+Pillow
+numpy
+opencv-python-headless
+pypinyin
