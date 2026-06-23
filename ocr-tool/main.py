@@ -110,27 +110,24 @@ if os.path.exists(app_pyc):
         with open(app_pyc, 'rb') as f:
             raw = f.read()
         app_code = marshal.loads(raw[16:])
-        
+            
         # Create module context
         app_mod = types.ModuleType('__main__')
         app_mod.__file__ = os.path.join(_base_dir, 'app.py')
         app_mod.__package__ = ''
         sys.modules['__main__'] = app_mod
-        
+            
         ns = app_mod.__dict__
         ns['__file__'] = os.path.join(_base_dir, 'app.py')
         ns['__name__'] = '__main__'
         exec(app_code, ns)
     except Exception as e:
-        # Write crash log to desktop
         import traceback
         crash_log = os.path.join(os.path.expanduser('~'), 'Desktop', 'OCR_CRASH_LOG.txt')
         with open(crash_log, 'w', encoding='utf-8') as f:
             f.write(f"OCR工具启动异常: {e}\n\n")
             f.write(traceback.format_exc())
         print(f"启动异常：{e}")
-        print(f"错误详情已写入：{crash_log}")
-        # Try to show a messagebox
         try:
             import tkinter.messagebox
             tkinter.messagebox.showerror("启动错误", f"OCR工具启动失败：{e}\n\n错误日志已写入桌面：OCR_CRASH_LOG.txt")
@@ -138,5 +135,15 @@ if os.path.exists(app_pyc):
             pass
         sys.exit(1)
 else:
+    crash_log = os.path.join(os.path.expanduser('~'), 'Desktop', 'OCR_CRASH_LOG.txt')
+    with open(crash_log, 'w', encoding='utf-8') as f:
+        f.write(f"错误：app.pyc 未找到\n")
+        f.write(f"搜索路径: {app_pyc}\n")
+        f.write(f"程序目录: {_base_dir}\n")
     print("Error: app.pyc not found in", _base_dir)
+    try:
+        import tkinter.messagebox
+        tkinter.messagebox.showerror("启动错误", f"OCR工具启动失败：app.pyc 未找到\n\n路径：{app_pyc}\n\n错误日志已写入桌面：OCR_CRASH_LOG.txt")
+    except Exception:
+        pass
     sys.exit(1)
