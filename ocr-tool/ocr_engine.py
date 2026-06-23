@@ -34,19 +34,78 @@ class OCREngine:
             self._init_engine(models_dir)
 
     def _init_engine(self, models_dir=None):
-        """Initialize the OCR engine.
+        """Initialize the OCR engine with optional custom model path.
         
         Args:
-            models_dir: Optional path (ignored for default init, 
-                        included for API compatibility with original app.pyc).
+            models_dir: Path to directory containing ONNX model files.
+                        If provided, RapidOCR is configured to use these models.
+                        The directory should contain:
+                        - ch_PP-OCRv4_det_infer.onnx (or v6 equivalent)
+                        - ch_PP-OCRv4_rec_infer.onnx
+                        - ch_ppocr_mobile_v2.0_cls_infer.onnx
         """
         try:
-            if RapidOCR is not None:
+            if RapidOCR is None:
+                logger.error("rapidocr_onnxruntime not available")
+                return
+
+            if models_dir and os.path.isdir(models_dir):
+                # Check if the directory has actual ONNX models
+                onnx_files = [f for f in os.listdir(models_dir) if f.endswith('.onnx')]
+                if onnx_files:
+                    logger.info(f"Using custom models from: {models_dir} ({len(onnx_files)} files)")
+                    # Create a custom config pointing to this model dir
+                    import tempfile
+                    import yaml
+                    config = {
+                        'Global': {
+                            'text_score': 0.5, 'use_det': True, 'use_cls': True, 'use_rec': True,
+                            'print_verbose': False, 'min_height': 30, 'width_height_ratio': 8,
+                            'max_side_len': 2000, 'min_side_len': 30, 'return_word_box': False,
+                        },
+                        'Det': {
+                            'model_path': os.path.join(models_dir, 'ch_PP-OCRv4_det_infer.onnx'),
+                            'limit_side_len': 736, 'limit_type': 'min',
+                            'std': [0.5, 0.5, 0.5], 'mean': [0.5, 0.5, 0.5],
+                            'thresh': 0.3, 'box_thresh': 0.5, 'max_candidates': 1000,
+                            'unclip_ratio': 1.6, 'use_dilation': True, 'score_mode': 'fast',
+                        },
+                        'Cls': {
+                            'model_path': os.path.join(models_dir, 'ch_ppocr_mobile_v2.0_cls_infer.onnx'),
+                            'cls_image_shape': [3, 48, 192], 'cls_batch_num': 6,
+                            'cls_thresh': 0.9, 'label_list': ['0', '180'],
+                        },
+                        'Rec': {
+                            'model_path': os.path.join(models_dir, 'ch_PP-OCRv4_rec_infer.onnx'),
+                            'rec_img_shape': [3, 48, 320], 'rec_batch_num': 6,
+                        },
+                    }
+                    # Try to detect actual model names in the directory
+                    for fn in onnx_files:
+                        fn_lower = fn.lower()
+                        if 'det' in fn_lower:
+                            config['Det']['model_path'] = os.path.join(models_dir, fn)
+                        elif 'rec' in fn_lower:
+                            config['Rec']['model_path'] = os.path.join(models_dir, fn)
+                        elif 'cls' in fn_lower:
+                            config['Cls']['model_path'] = os.path.join(models_dir, fn)
+                    
+                    config_file = tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False)
+                    yaml.dump(config, config_file)
+                    config_file.close()
+                    
+                    self.engine = RapidOCR(config_path=config_file.name)
+                    os.unlink(config_file.name)  # Clean up - RapidOCR already loaded models
+                    self._ready = True
+                    logger.info(f"OCR Engine v6 initialized with custom models from {models_dir}")
+                else:
+                    logger.warning(f"No ONNX models found in {models_dir}, using defaults")
+                    self.engine = RapidOCR()
+                    self._ready = True
+            else:
                 self.engine = RapidOCR()
                 self._ready = True
-                logger.info("OCR Engine v6 initialized")
-            else:
-                logger.error("rapidocr_onnxruntime not available")
+                logger.info("OCR Engine initialized (default models)")
         except Exception as e:
             logger.error(f"Failed to init OCR engine: {e}")
             self._ready = False
