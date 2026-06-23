@@ -23,7 +23,7 @@ jobs:
       - name: Build with PyInstaller
         working-directory: ocr-tool
         run: |
-          pyinstaller --onefile --windowed --clean --name OCRDataExtractor --add-data "app.pyc;." --collect-all rapidocr_onnxruntime --collect-all cv2 --collect-all numpy --hidden-import=PIL._tkinter_finder main.py
+          pyinstaller --onefile --windowed --clean --name OCRDataExtractor --add-data "app.pyc;." --collect-all rapidocr_onnxruntime --collect-all cv2 --collect-all numpy --hidden-import=PIL._tkinter_finder --hidden-import=tkinter.ttk --hidden-import=tkinter.messagebox --hidden-import=tkinter.filedialog main.py
       - uses: actions/upload-artifact@v4
         with:
           name: OCRDataExtractor
