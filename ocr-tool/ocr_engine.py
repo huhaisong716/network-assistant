@@ -27,19 +27,24 @@ class OCREngine:
     Each result dict: {'text': str, 'box': list, 'confidence': float}
     """
 
-    def __init__(self, model_dir=None):
+    def __init__(self, models_dir=None):
         self.engine = None
         self._ready = False
-        if model_dir:
-            self._init_engine(model_dir)
+        if models_dir:
+            self._init_engine(models_dir)
 
-    def _init_engine(self, model_dir=None):
-        """Initialize the OCR engine."""
+    def _init_engine(self, models_dir=None):
+        """Initialize the OCR engine.
+        
+        Args:
+            models_dir: Optional path (ignored for default init, 
+                        included for API compatibility with original app.pyc).
+        """
         try:
             if RapidOCR is not None:
                 self.engine = RapidOCR()
                 self._ready = True
-                logger.info("OCR Engine initialized (rapidocr_v6 mode)")
+                logger.info("OCR Engine v6 initialized")
             else:
                 logger.error("rapidocr_onnxruntime not available")
         except Exception as e:
