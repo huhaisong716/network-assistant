@@ -5,6 +5,7 @@ on:
     branches: [ main ]
     paths:
       - 'ocr-tool/**'
+      - '.github/workflows/build-ocr.yml'
   workflow_dispatch:
 
 jobs:
