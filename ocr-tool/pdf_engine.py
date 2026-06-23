@@ -10,21 +10,24 @@ logger = logging.getLogger('pdf_engine')
 class PdfEngine:
     """PDF Engine - PyMuPDF wrapper for PDF loading and text extraction."""
 
-    def __init__(self):
+    def __init__(self, path=None):
         self.doc = None
         self.text_pages = {}  # page_num (0-idx) -> text
         self.image_pages = set()
         self._page_count = 0
+        if path:
+            self.load(path)
 
     @property
     def page_count(self):
         return self._page_count
 
     def load(self, path):
-        """Load a PDF file."""
+        """Load a PDF file and scan text pages immediately."""
         self.close()
         self.doc = fitz.open(path)
         self._page_count = len(self.doc)
+        self.scan_text_pages()
 
     def close(self):
         if self.doc:

@@ -89,6 +89,10 @@ class SearchEngine:
         if not page_results and chinese_char_count >= 2 and chinese_chars:
             self._search_global_fallback(chinese_chars, page_results)
 
+        # Strategy F: Despaced full match - remove whitespace, try full query
+        if not page_results:
+            self._search_despaced(query, page_results)
+
         unique_results = sorted(page_results.values(), key=lambda x: x.get('page', 0))
         return unique_results
 
@@ -320,6 +324,102 @@ class SearchEngine:
                     'source': 'OCR(跨页)',
                 }
                 logger.debug(f'[Strategy D] page {display_page}: {matched}/{n} chars')
+
+    # ── Strategy E: Global fallback ────────────────────────────
+
+    def _search_global_fallback(self, chinese_chars, page_results):
+        """Strategy E: Global fallback when per-page strategies fail.
+        Check if ALL chars exist ANYWHERE in the document, then return
+        ANY page with at least one matching char.
+        """
+        n = len(chinese_chars)
+        query_str = ''.join(chinese_chars)
+
+        # Build global text from all sources
+        all_text = ''
+        if self.pdf_engine:
+            all_text += ' '.join(self.pdf_engine.text_pages.values())
+        all_text += ' '.join(
+            ' '.join(r['text'] for r in results)
+            for results in self.ocr_results.values()
+        )
+
+        if not all(c in all_text for c in chinese_chars):
+            logger.debug(f'[Strategy E] not all chars found in document')
+            return
+
+        logger.debug(f'[Strategy E] global fallback, all {n} chars found in document')
+
+        # Return any page with at least one matching char
+        if self.pdf_engine:
+            for page_num, text in self.pdf_engine.text_pages.items():
+                display_page = page_num + 1
+                if display_page in page_results:
+                    continue
+                matched = [c for c in chinese_chars if c in text]
+                if matched:
+                    snippet = text[:120].strip().replace('\n', ' ')
+                    page_results[display_page] = {
+                        'page': display_page,
+                        'text': snippet,
+                        'source': '文字层(全局)',
+                    }
+        for page_num, results in self.ocr_results.items():
+            display_page = page_num + 1
+            if display_page in page_results:
+                continue
+            all_txt = ' '.join(r['text'] for r in results)
+            matched = [c for c in chinese_chars if c in all_txt]
+            if matched:
+                page_results[display_page] = {
+                    'page': display_page,
+                    'text': all_txt[:120],
+                    'source': 'OCR(全局)',
+                }
+
+    # ── Strategy F: Despaced full-match ────────────────────────
+
+    def _search_despaced(self, query, page_results):
+        """Strategy F: Remove all whitespace from page text, try full query match.
+        
+        Handles case where OCR outputs consecutive characters with spaces
+        between them (e.g. '王 麻 子' instead of '王麻子').
+        Only runs AFTER all other strategies have failed.
+        """
+        import re
+        query_clean = re.sub(r'\s+', '', query)
+        if not query_clean:
+            return
+
+        logger.debug(f"[Strategy F] despaced search for '{query}' -> '{query_clean}'")
+
+        if self.pdf_engine:
+            for page_num, text in self.pdf_engine.text_pages.items():
+                display_page = page_num + 1
+                if display_page in page_results:
+                    continue
+                text_clean = re.sub(r'\s+', '', text)
+                if query_clean in text_clean:
+                    snippet = text[:120].strip().replace('\n', ' ')
+                    page_results[display_page] = {
+                        'page': display_page,
+                        'text': snippet,
+                        'source': '文字层(去空)',
+                    }
+
+        for page_num, results in self.ocr_results.items():
+            display_page = page_num + 1
+            if display_page in page_results:
+                continue
+            all_text = ' '.join(r['text'] for r in results)
+            text_clean = re.sub(r'\s+', '', all_text)
+            if query_clean in text_clean:
+                snippet = all_text[:120]
+                page_results[display_page] = {
+                    'page': display_page,
+                    'text': snippet,
+                    'source': 'OCR(去空)',
+                }
 
     # ── Pinyin helpers (graceful fallback if pypinyin not installed) ──
 
