@@ -59,23 +59,34 @@ class PdfEngine:
         page = self.doc[page_num]
         return page.get_text('text')
 
-    def render_page(self, page_num, dpi=200):
-        """Render page as PNG bytes."""
+    def render_page(self, page_num, dpi=200, zoom=None):
+        """Render page as PIL Image suitable for OCR processing.
+        
+        Args:
+            page_num: 0-indexed page number
+            dpi: Resolution in DPI (default 200)
+            zoom: Alternative zoom factor (1.0 = 72 DPI). 
+                  If provided, overrides dpi with zoom * 72.
+        Returns:
+            PIL.Image ready for OCR recognition
+        """
         if not self.doc:
-            return b''
+            return None
         page = self.doc[page_num]
-        mat = fitz.Matrix(dpi / 72, dpi / 72)
+        if zoom is not None:
+            mat = fitz.Matrix(zoom, zoom)
+        else:
+            mat = fitz.Matrix(dpi / 72, dpi / 72)
         pix = page.get_pixmap(matrix=mat)
-        return pix.tobytes('png')
+        from PIL import Image
+        import io
+        return Image.open(io.BytesIO(pix.tobytes('png')))
 
     def render_page_pil(self, page_num, dpi=200):
         """Render page as PIL Image."""
-        from PIL import Image
-        import io
         if not self.doc:
             return None
-        img_data = self.render_page(page_num, dpi)
-        return Image.open(io.BytesIO(img_data))
+        return self.render_page(page_num, dpi)
 
     def export_pages(self, page_nums, dpi=200):
         """Export specific pages as PNG bytes list."""
