@@ -9,6 +9,39 @@ import types
 _base_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _base_dir)
 
+# ── Patch fitz.open to prevent PDF loading hangs ─────────────
+import fitz
+import threading
+import time
+import tkinter.messagebox as tkmsg
+
+_original_fitz_open = fitz.open
+
+def _safe_fitz_open(*args, **kwargs):
+    """Wrap fitz.open with timeout protection to prevent infinite hang on problematic PDFs."""
+    result = [None]
+    error = [None]
+    done = threading.Event()
+
+    def _open_thread():
+        try:
+            result[0] = _original_fitz_open(*args, **kwargs)
+        except Exception as e:
+            error[0] = e
+        finally:
+            done.set()
+
+    t = threading.Thread(target=_open_thread, daemon=True)
+    t.start()
+
+    if not done.wait(timeout=60):
+        raise TimeoutError(f"PDF 加载超时（>60秒）: {args[0] if args else '?'}")
+    if error[0]:
+        raise error[0]
+    return result[0]
+
+fitz.open = _safe_fitz_open
+
 # ── Patch SearchEngine with cross-page strategies ────────────
 import search_engine
 from search_engine import SearchEngine
