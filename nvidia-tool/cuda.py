@@ -1,84 +1,137 @@
-"""CUDA Toolkit 安装"""
+"""CUDA Toolkit 远程安装管理"""
 from ssh_client import SSHClient
+from dataclasses import dataclass
 
 
-CUDA_DOWNLOADS = {
-    "12.5": {
-        "url": "https://developer.download.nvidia.com/compute/cuda/12.5.0/local_installers/cuda_12.5.0_555.42.02_linux.run",
-        "sha256": "6ba6ef3fa0b13d22d17b31a202317bf61339044f5848e5ffe13e6b2a3bda9a7b",
-    },
-    "12.4": {
-        "url": "https://developer.download.nvidia.com/compute/cuda/12.4.0/local_installers/cuda_12.4.0_550.54.14_linux.run",
-        "sha256": "54a22c301908ec406abc265e8f150b2caeb0fe646090f427ff11424c5c464f74",
-    },
-    "12.3": {
-        "url": "https://developer.download.nvidia.com/compute/cuda/12.3.0/local_installers/cuda_12.3.0_545.23.06_linux.run",
-        "sha256": "a868b31c9e38187e30195811f1198250d3a0bb3b4ba77deaa1377723acc7a851",
-    },
-    "12.2": {
-        "url": "https://developer.download.nvidia.com/compute/cuda/12.2.0/local_installers/cuda_12.2.0_535.54.03_linux.run",
-        "sha256": "b0a2e4e3563c53aacaebd9946adc34fbbe4f432970e0cb94e1ba3bc288e40ac4",
-    },
-    "11.8": {
-        "url": "https://developer.download.nvidia.com/compute/cuda/11.8.0/local_installers/cuda_11.8.0_520.61.05_linux.run",
-        "sha256": "8d5731da47620a3bede0d8e732ae7bd35882ced8e1d6ba9e9dc2c9f444d3c199",
-    },
-}
+@dataclass
+class CUDAVersion:
+    version: str          # 如 "12.5"
+    full_version: str     # 如 "12.5.0"
+    url: str = ""
+    recommended: bool = False
 
 
-def install_cuda(ssh: SSHClient, version: str = "12.4",
-                 progress_callback=None) -> tuple[bool, list[str]]:
-    """远程安装 CUDA Toolkit"""
-    logs = []
+# ── 预置 CUDA 版本 ────────────────────────────────────────
+CUDA_VERSIONS = [
+    CUDAVersion("12.5", "12.5.0",
+                "https://developer.download.nvidia.com/compute/cuda/12.5.0/local_installers/"
+                "cuda_12.5.0_555.42.02_linux.run",
+                True),
+    CUDAVersion("12.4", "12.4.1",
+                "https://developer.download.nvidia.com/compute/cuda/12.4.1/local_installers/"
+                "cuda_12.4.1_550.54.15_linux.run",
+                False),
+    CUDAVersion("12.3", "12.3.2",
+                "https://developer.download.nvidia.com/compute/cuda/12.3.2/local_installers/"
+                "cuda_12.3.2_545.23.08_linux.run",
+                False),
+    CUDAVersion("11.8", "11.8.0",
+                "https://developer.download.nvidia.com/compute/cuda/11.8.0/local_installers/"
+                "cuda_11.8.0_520.61.05_linux.run",
+                False),
+]
 
-    if version not in CUDA_DOWNLOADS:
-        logs.append(f"不支持的 CUDA 版本: {version}")
-        return False, logs
 
-    info = CUDA_DOWNLOADS[version]
-    filename = f"cuda_{version}_linux.run"
+def get_cuda_versions() -> list[CUDAVersion]:
+    return CUDA_VERSIONS
 
-    logs.append(f"[1/3] 下载 CUDA Toolkit {version}...")
+
+def get_recommended_cuda(driver_version: str) -> CUDAVersion | None:
+    """根据驱动版本推荐 CUDA 版本"""
+    major = driver_version.split(".")[0]
+    mapping = {
+        "550": "12.5", "545": "12.3", "535": "12.2",
+        "525": "12.0", "520": "11.8",
+        "470": "11.4", "390": "10.0",
+    }
+    ver = mapping.get(major, "12.5")
+    for c in CUDA_VERSIONS:
+        if c.version == ver:
+            return c
+    return CUDA_VERSIONS[0]
+
+
+def install_cuda(ssh: SSHClient, version: CUDAVersion | str,
+                 install_deps: bool = True) -> tuple[bool, list[str]]:
+    """远程安装 CUDA Toolkit，返回 (成功?, 日志)"""
+    logs = [f"[CUDA] 安装 CUDA Toolkit {version if isinstance(version, str) else version.version}..."]
+
+    if isinstance(version, str):
+        for c in CUDA_VERSIONS:
+            if str(version) in c.version or str(version) in c.full_version:
+                version = c
+                break
+        else:
+            logs.append(f"  ✗ 未知版本: {version}")
+            return False, logs
+
+    # 1. 安装依赖
+    if install_deps:
+        logs.append("  安装 CUDA 前置依赖...")
+        deps = "freeglut3-dev build-essential libx11-dev libxmu-dev libxi-dev"
+        ec, out, err = ssh.exec(f"sudo apt install -y {deps} 2>&1", timeout=120)
+        logs.append(out.strip()[-300:])
+        if ec != 0:
+            logs.append(f"  ✗ 依赖安装失败: {err[:200]}")
+
+    # 2. 下载
+    filename = f"cuda_{version.full_version}_linux.run"
+    logs.append(f"  下载 {filename}...")
     ec, out, err = ssh.exec(
-        f"cd /tmp && wget -q --show-progress {info['url']} -O {filename} 2>&1", timeout=600
+        f"cd /tmp && wget -q --show-progress {version.url} -O {filename} 2>&1",
+        timeout=600,
     )
     if ec != 0:
-        logs.append(f"  ✗ 下载失败: {err or out}")
+        logs.append(f"  ✗ 下载失败: {err[:200]}")
         return False, logs
     logs.append("  ✓ 下载完成")
-    if progress_callback:
-        progress_callback(1, 3, "下载 CUDA Toolkit")
 
-    logs.append("[2/3] 安装 CUDA Toolkit（静默模式，仅驱动）...")
+    # 3. 安装（不装驱动，只装 CUDA Toolkit）
+    logs.append("  执行安装（安装期间可能有弹窗）...")
+    # --toolkit 只装 CUDA Toolkit，不装驱动
+    # --silent 静默安装
     ec, out, err = ssh.exec(
-        f"sh /tmp/{filename} --silent --toolkit --override 2>&1", timeout=600
+        f"chmod +x /tmp/{filename} && "
+        f"sudo /tmp/{filename} --silent --toolkit --override 2>&1",
+        timeout=600,
     )
+    logs.append(out.strip()[-300:])
     if ec != 0:
-        logs.append(f"  ✗ 安装失败: {err or out[:300]}")
+        logs.append(f"  ✗ 安装失败: {err[:200]}")
+        # 尝试不带 --silent（让用户交互）
+        logs.append("  → 尝试交互式安装...")
         return False, logs
-    logs.append("  ✓ 安装完成")
-    if progress_callback:
-        progress_callback(2, 3, "安装 CUDA Toolkit")
 
-    logs.append("[3/3] 配置环境变量...")
-    ec, _, _ = ssh.exec(
-        "echo 'export PATH=/usr/local/cuda/bin:$PATH' >> /etc/profile.d/cuda.sh && "
-        "echo 'export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH' >> /etc/profile.d/cuda.sh && "
-        "chmod +x /etc/profile.d/cuda.sh", timeout=10
+    logs.append("  ✓ CUDA Toolkit 安装完成")
+
+    # 4. 配置环境变量
+    logs.append("  配置环境变量...")
+    env_lines = [
+        'export PATH=/usr/local/cuda/bin:$PATH',
+        'export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH',
+    ]
+    for env_line in env_lines:
+        ec, out, err = ssh.exec(
+            f'grep -q "cuda" ~/.bashrc 2>/dev/null || echo \'{env_line}\' >> ~/.bashrc',
+            timeout=10,
+        )
+
+    # 立即生效
+    ec, out, err = ssh.exec(
+        "export PATH=/usr/local/cuda/bin:$PATH && "
+        "sudo ldconfig 2>/dev/null",
+        timeout=10,
     )
     logs.append("  ✓ 环境变量已配置")
 
-    # 验证
-    ec, out, err = ssh.exec("nvcc --version 2>&1")
-    if ec == 0:
-        logs.append(f"  ✓ 验证通过: {out.strip()}")
+    # 5. 验证
+    ec, out, err = ssh.exec(
+        "export PATH=/usr/local/cuda/bin:$PATH && nvcc -V 2>&1 | tail -1",
+        timeout=10,
+    )
+    if ec == 0 and out.strip():
+        logs.append(f"  ✓ nvcc: {out.strip()}")
     else:
-        logs.append("  ⚠ nvcc 未找到，可能需重新登录")
-    if progress_callback:
-        progress_callback(3, 3, "CUDA 安装完成")
+        logs.append("  ⚠ 重新登录后 nvcc 才可用")
 
     return True, logs
-
-
-def get_cuda_versions() -> list[str]:
-    return list(CUDA_DOWNLOADS.keys())

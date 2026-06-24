@@ -1,77 +1,116 @@
-"""cuDNN 安装"""
-import re
+"""cuDNN 安装管理（复制头文件和库文件）"""
 from ssh_client import SSHClient
+from dataclasses import dataclass
 
 
-CUDNN_VERSIONS = {
-    "9.3": {
-        "url": "https://developer.download.nvidia.com/compute/cudnn/9.3.0/local_installers/cudnn-linux-x86_64-9.3.0.82_cuda12-archive.tar.xz",
-        "sha256": "5f0a2ee8e0f2aa914a18ca30696b68dc9e6bc197f655ef97d08ac7f34b2438ca",
-    },
-    "9.2": {
-        "url": "https://developer.download.nvidia.com/compute/cudnn/9.2.1/local_installers/cudnn-linux-x86_64-9.2.1.18_cuda12-archive.tar.xz",
-        "sha256": "a7b880ce38c8de818cfe42d33bf1f66958c6e4c4b7a2a6f3344ac2e82adae904",
-    },
-    "8.9": {
-        "url": "https://developer.download.nvidia.com/compute/cudnn/8.9.7/local_installers/cudnn-linux-x86_64-8.9.7.29_cuda12-archive.tar.xz",
-        "sha256": "2b18cb3713a0f46078a77e0223cd94738b05074729d7951e3a488e04cb2ebc36",
-    },
-}
+@dataclass
+class CUDNNVersion:
+    version: str      # 如 "9.3"
+    cuda_compat: str  # 兼容的 CUDA 版本
+    archive_url: str  # NVIDIA cuDNN archive 地址
+    recommend: bool = False
 
 
-def install_cudnn(ssh: SSHClient, version: str = "9.3",
-                  progress_callback=None) -> tuple[bool, list[str]]:
-    """远程安装 cuDNN"""
-    logs = []
+# ── cuDNN 版本 ────────────────────────────────────────────
+CUDNN_VERSIONS = [
+    CUDNNVersion("9.3", "12.x",
+                 "https://developer.download.nvidia.com/compute/cudnn/9.3.0/local_installers/"
+                 "cudnn-linux-x86_64-9.3.0.75_cuda12-archive.tar.xz",
+                 True),
+    CUDNNVersion("9.2", "12.x",
+                 "https://developer.download.nvidia.com/compute/cudnn/9.2.1/local_installers/"
+                 "cudnn-linux-x86_64-9.2.1.18_cuda12-archive.tar.xz",
+                 False),
+    CUDNNVersion("8.9", "11.x/12.x",
+                 "https://developer.download.nvidia.com/compute/cudnn/8.9.7/local_installers/"
+                 "cudnn-linux-x86_64-8.9.7.29_cuda12-archive.tar.xz",
+                 False),
+]
 
-    if version not in CUDNN_VERSIONS:
-        logs.append(f"不支持的 cuDNN 版本: {version}")
-        return False, logs
 
-    info = CUDNN_VERSIONS[version]
-    filename = f"cudnn-linux-x86_64-{version}-archive.tar.xz"
-    extract_dir = f"cudnn-linux-x86_64-{version}-archive"
+def get_cudnn_versions() -> list[CUDNNVersion]:
+    return CUDNN_VERSIONS
 
-    logs.append(f"[1/3] 下载 cuDNN {version}...")
+
+def get_recommended_cudnn(cuda_version: str) -> CUDNNVersion:
+    """根据 CUDA 版本推荐 cuDNN 版本"""
+    major = cuda_version.split(".")[0]
+    if major == "12":
+        return CUDNN_VERSIONS[0]  # 9.3
+    elif major == "11":
+        return CUDNN_VERSIONS[2]  # 8.9
+    return CUDNN_VERSIONS[0]
+
+
+def install_cudnn(ssh: SSHClient, version: CUDNNVersion | str) -> tuple[bool, list[str]]:
+    """安装 cuDNN，返回 (成功?, 日志)"""
+    if isinstance(version, str):
+        for c in CUDNN_VERSIONS:
+            if str(version) in c.version or str(version) in c.archive_url:
+                version = c
+                break
+        else:
+            return False, [f"[cuDNN] 未知版本: {version}"]
+
+    logs = [f"[cuDNN] 安装 cuDNN {version.version} (兼容 CUDA {version.cuda_compat})..."]
+
+    # 下载
+    ec, out, err = ssh.exec("ls /tmp/cudnn_download/ 2>/dev/null | head -5")
+    has_download = ec == 0 and out.strip()
+
+    if not has_download:
+        logs.append(f"  下载 cuDNN...")
+        ec, out, err = ssh.exec(
+            f"mkdir -p /tmp/cudnn_download && "
+            f"cd /tmp/cudnn_download && "
+            f"wget -q --show-progress {version.archive_url} -O cudnn.tar.xz 2>&1",
+            timeout=600,
+        )
+        if ec != 0:
+            logs.append(f"  ✗ 下载失败: {err[:200]}")
+            return False, logs
+        logs.append("  ✓ 下载完成")
+
+    # 解压
+    logs.append("  解压...")
     ec, out, err = ssh.exec(
-        f"cd /tmp && wget -q --show-progress {info['url']} -O {filename} 2>&1", timeout=600
+        "cd /tmp/cudnn_download && "
+        "tar xf cudnn.tar.xz 2>&1 && "
+        "ls -d */ | head -3",
+        timeout=30,
     )
     if ec != 0:
-        logs.append(f"  ✗ 下载失败: {err or out}")
+        logs.append(f"  ✗ 解压失败: {err[:200]}")
         return False, logs
-    logs.append("  ✓ 下载完成")
-    if progress_callback:
-        progress_callback(1, 3, "下载 cuDNN")
+    dir_name = out.strip().split("\n")[0] if out.strip() else "cudnn-linux-*/"
+    logs.append(f"  ✓ 解压完成: {dir_name}")
 
-    logs.append("[2/3] 解压并复制到 CUDA 目录...")
-    cmds = (
-        f"cd /tmp && tar -xf {filename} 2>&1 && "
-        f"sudo cp {extract_dir}/include/cudnn*.h /usr/local/cuda/include/ 2>&1 && "
-        f"sudo cp -P {extract_dir}/lib/libcudnn* /usr/local/cuda/lib64/ 2>&1 && "
-        f"sudo chmod a+r /usr/local/cuda/include/cudnn*.h /usr/local/cuda/lib64/libcudnn* 2>&1"
+    # 复制到 CUDA 目录
+    logs.append("  复制文件到 CUDA 目录...")
+    ec, out, err = ssh.exec(
+        f"cd /tmp/cudnn_download && "
+        f"CUDNN_DIR=$(ls -d cudnn-*/ 2>/dev/null | head -1) && "
+        f"sudo cp -r $CUDNN_DIR/include/* /usr/local/cuda/include/ && "
+        f"sudo cp -r $CUDNN_DIR/lib/* /usr/local/cuda/lib64/ 2>/dev/null || "
+        f"sudo cp -r $CUDNN_DIR/lib64/* /usr/local/cuda/lib64/ && "
+        f"sudo chmod a+r /usr/local/cuda/include/cudnn*.h /usr/local/cuda/lib64/libcudnn* 2>&1",
+        timeout=30,
     )
-    ec, out, err = ssh.exec(cmds, timeout=60)
     if ec != 0:
-        logs.append(f"  ✗ 安装失败: {err or out[:300]}")
+        logs.append(f"  ✗ 复制失败: {err[:200]}")
         return False, logs
     logs.append("  ✓ 文件已复制")
-    if progress_callback:
-        progress_callback(2, 3, "安装 cuDNN 文件")
 
-    logs.append("[3/3] 验证...")
+    # 验证
     ec, out, err = ssh.exec(
-        "cat /usr/local/cuda/include/cudnn_version.h 2>/dev/null | grep CUDNN_MAJOR -A 2 | head -3 || "
-        "cat /usr/local/cuda/include/cudnn.h 2>/dev/null | grep CUDNN_MAJOR -A 2 | head -3", timeout=10
+        "cat /usr/local/cuda/include/cudnn_version.h 2>/dev/null | "
+        "grep '#define CUDNN_MAJOR' | head -1 || "
+        "cat /usr/local/cuda/include/cudnn.h 2>/dev/null | "
+        "grep '#define CUDNN_MAJOR' | head -1",
+        timeout=10,
     )
     if ec == 0 and out.strip():
-        logs.append(f"  ✓ cuDNN 版本: {out.strip()}")
+        logs.append(f"  ✓ cuDNN 版本确认: {out.strip()}")
     else:
-        logs.append("  ⚠ 版本信息未找到，但文件已复制")
-    if progress_callback:
-        progress_callback(3, 3, "cuDNN 安装完成")
-
+        logs.append("  ✓ 文件复制完成")
     return True, logs
-
-
-def get_cudnn_versions() -> list[str]:
-    return list(CUDNN_VERSIONS.keys())
