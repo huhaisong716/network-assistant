@@ -153,7 +153,7 @@ class DriverInstaller:
         self.log_lines.append(f"  执行安装（安装期间可能有弹窗）...")
         ec, out, err = self.ssh.exec(
             f"chmod +x /tmp/{filename} && "
-            f"sudo /tmp/{filename} --silent --accept-license --no-opengl-files --no-x-check 2>&1",
+            f"sudo /tmp/{filename} --silent --dkms --disable-nouveau --accept-license --no-opengl-files --no-x-check 2>&1",
             timeout=600,
         )
         if ec != 0:

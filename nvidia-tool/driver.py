@@ -58,6 +58,43 @@ def get_recommended_for_gpu(model: str) -> DriverOption:
         return BUILTIN_DRIVERS[2]  # 525
 
 
+# ── Driver ↔ CUDA 版本兼容对照表（SOP 标准） ──────────────
+DRIVER_CUDA_COMPAT = {
+    # driver_major -> max_cuda_version
+    "580": "13.x",
+    "570": "12.8",
+    "560": "12.6",
+    "550": "12.4",
+    "545": "12.3",
+    "535": "12.2",
+    "525": "12.0",
+    "520": "11.8",
+    "470": "11.4",
+    "390": "10.0",
+}
+
+
+def get_max_cuda_for_driver(driver_version: str) -> str:
+    """根据驱动版本号返回支持的最高 CUDA 版本"""
+    major = driver_version.split(".")[0]
+    return DRIVER_CUDA_COMPAT.get(major, "12.x")
+
+
+def validate_cuda_for_driver(driver_version: str, cuda_version: str) -> tuple[bool, str]:
+    """校验 CUDA 版本是否 ≤ 驱动支持的最高版本，返回 (通过?, 消息)"""
+    max_cuda = get_max_cuda_for_driver(driver_version)
+    if max_cuda == "13.x":
+        return True, f"驱动 {driver_version} 支持 CUDA {max_cuda}，兼容"
+    cuda_major = cuda_version.split(".")[0]
+    max_major = max_cuda.split(".")[0]
+    try:
+        if float(cuda_major) <= float(max_major):
+            return True, f"CUDA {cuda_version} ≤ 驱动支持的最高版本 {max_cuda}，兼容"
+        return False, f"CUDA {cuda_version} 超出驱动支持上限 {max_cuda}，请选择更低版本"
+    except ValueError:
+        return True, "无法校验版本兼容性"
+
+
 def parse_latest_stable(html: str) -> Optional[str]:
     """从 NVIDIA 官网页面提取最新稳定版号"""
     m = re.search(r"Latest\s*Production\s*Branch:\s*(\S+)", html, re.I)

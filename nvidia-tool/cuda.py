@@ -52,9 +52,26 @@ def get_recommended_cuda(driver_version: str) -> CUDAVersion | None:
 
 
 def install_cuda(ssh: SSHClient, version: CUDAVersion | str,
-                 install_deps: bool = True) -> tuple[bool, list[str]]:
-    """远程安装 CUDA Toolkit，返回 (成功?, 日志)"""
+                 install_deps: bool = True, driver_version: str = "") -> tuple[bool, list[str]]:
+    """远程安装 CUDA Toolkit，返回 (成功?, 日志)
+
+    Args:
+        ssh: SSH 客户端
+        version: CUDA 版本
+        install_deps: 是否自动安装前置依赖
+        driver_version: 已安装的驱动版本（用于版本兼容校验）
+    """
     logs = [f"[CUDA] 安装 CUDA Toolkit {version if isinstance(version, str) else version.version}..."]
+
+    # 版本兼容校验
+    if driver_version:
+        from driver import validate_cuda_for_driver
+        ver_str = version if isinstance(version, str) else version.version
+        ok, msg = validate_cuda_for_driver(driver_version, ver_str)
+        logs.append(f"  兼容性校验: {msg}")
+        if not ok:
+            logs.append("  ✗ CUDA 版本过高，请选择更低版本")
+            return False, logs
 
     if isinstance(version, str):
         for c in CUDA_VERSIONS:
@@ -123,6 +140,26 @@ def install_cuda(ssh: SSHClient, version: CUDAVersion | str,
         timeout=10,
     )
     logs.append("  ✓ 环境变量已配置")
+
+    # 5. 软链接统一入口（如 /usr/local/cuda-12.5 → /usr/local/cuda）
+    logs.append("  设置 CUDA 软链接...")
+    full_ver = version.full_version if hasattr(version, 'full_version') else version
+    # 尝试常见路径模式
+    for candidate in [f"/usr/local/cuda-{full_ver}", f"/usr/local/cuda-{full_ver.split('.')[0]}"]:
+        ec, out, _ = ssh.exec(f"test -d {candidate} && echo found", timeout=5)
+        if "found" in out:
+            ssh.exec(f"sudo ln -sf {candidate} /usr/local/cuda 2>/dev/null", timeout=5)
+            logs.append(f"  ✓ {candidate} → /usr/local/cuda")
+            break
+    else:
+        # 兜底：直接链接到实际路径
+        ec, out, _ = ssh.exec("ls -d /usr/local/cuda-* 2>/dev/null | head -1", timeout=5)
+        if out.strip():
+            actual = out.strip()
+            ssh.exec(f"sudo ln -sf {actual} /usr/local/cuda 2>/dev/null", timeout=5)
+            logs.append(f"  ✓ {actual} → /usr/local/cuda")
+        else:
+            logs.append("  → 未找到 CUDA 安装目录，跳过软链接")
 
     # 5. 验证
     ec, out, err = ssh.exec(

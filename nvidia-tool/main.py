@@ -27,6 +27,7 @@ from driver import (BUILTIN_DRIVERS, DriverOption, get_runfile_url,
 from envcheck import (
     DRIVER_DEPENDENCIES, CUDA_DEPENDENCIES,
     check_all_deps, get_failed, install_dependency, query_ubuntu_drivers,
+    detect_os, get_install_cmd, check_dependency,
 )
 from installer import NouveauManager, DependencyManager, DriverInstaller, reboot_system, wait_for_reboot
 from cuda import get_cuda_versions, get_recommended_cuda, install_cuda, CUDAVersion
@@ -523,10 +524,12 @@ class DependencyPage(QWidget):
         ssh = self.get_ssh()
         if not ssh:
             QMessageBox.warning(self, "提示", "请先在「服务器」页面连接"); return
-        self.status_label.setText("🔄 检测中..."); self.btn_check.setEnabled(False)
+        self.status_label.setText("🔄 检测系统类型和依赖..."); self.btn_check.setEnabled(False)
 
         def task():
-            results = check_all_deps(ssh, DRIVER_DEPENDENCIES)
+            os_type = detect_os(ssh)
+            self._os_type = os_type
+            results = check_all_deps(ssh, DRIVER_DEPENDENCIES, os_type)
             self.bridge.deps_signal.emit(results)
             self.btn_check.setEnabled(True)
         threading.Thread(target=task, daemon=True).start()
@@ -572,19 +575,20 @@ class DependencyPage(QWidget):
         self.bridge.log_signal.emit(f"📦 开始安装 {len(selected)} 项依赖...")
 
         def task():
-            mgr = DependencyManager(ssh)
+            os_type = getattr(self, '_os_type', detect_os(ssh))
             _dep_defs = DRIVER_DEPENDENCIES
             for key in selected:
                 dep = _dep_defs.get(key, {})
+                install_cmd = get_install_cmd(dep, os_type)
                 self.bridge.log_signal.emit(f"  安装 {dep.get('label', key)}...")
-                ec, out, err = ssh.exec(f"sudo {dep.get('install_cmd', '')}", timeout=120)
+                ec, out, err = ssh.exec(f"sudo {install_cmd}", timeout=120)
                 if ec != 0:
                     self.bridge.log_signal.emit(f"  ✗ {err[:100]}")
                 else:
                     self.bridge.log_signal.emit(f"  ✓ 完成")
             # 重新检测
             self.bridge.log_signal.emit(f"🔄 重新检测依赖...")
-            results = check_all_deps(ssh, DRIVER_DEPENDENCIES)
+            results = check_all_deps(ssh, DRIVER_DEPENDENCIES, os_type)
             self.bridge.dep_install_done.emit(results)
         threading.Thread(target=task, daemon=True).start()
 
@@ -995,13 +999,19 @@ class CudaInstallPage(QWidget):
         ver_str = item.data(Qt.UserRole)
         dlg = ConfirmDialog("安装 CUDA Toolkit",
                            f"即将安装 CUDA Toolkit {ver_str}？",
-                           "安装包约 3-4GB，下载耗时较长。安装后会自动配置环境变量。")
+                           "安装包约 3-4GB，下载耗时较长。安装后会自动配置环境变量和CUDA软链接。")
         if not dlg.is_accepted(): return
         self.log_view.clear()
         self.btn_install.setEnabled(False)
 
         def task():
-            success, logs = install_cuda(ssh, ver_str)
+            # 获取已安装的驱动版本
+            driver_version = ""
+            ec, out, _ = ssh.exec("nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null", timeout=10)
+            if ec == 0 and out.strip():
+                driver_version = out.strip().split("\n")[0].strip()
+                self.bridge.log_signal.emit(f"  检测到驱动版本: {driver_version}")
+            success, logs = install_cuda(ssh, ver_str, driver_version=driver_version)
             for l in logs: self.bridge.log_signal.emit(l)
             self.bridge.cuda_install_signal.emit(success, logs)
             self.btn_install.setEnabled(True)
